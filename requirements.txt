@@ -1,0 +1,11 @@
+# IndicTrans2 (en-indic distilled 200M) — local inference dependencies
+#
+# transformers must be <5.0.0: the model ships a custom (remote) tokenizer and
+# the "translation" pipeline, both of which were removed in transformers v5.
+transformers<5.0.0
+torch
+sentencepiece
+sacremoses
+# IndicProcessor (pre/post-processing) lives here. Installed from GitHub because
+# it is not published on PyPI. See download_model.py for the install command.
+# IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git

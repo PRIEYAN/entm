@@ -1,3 +1,5 @@
 venv
 __pycache__/
 *.pyc
+# downloaded model weights — re-download on each machine, don't commit
+model_cache/
