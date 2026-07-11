@@ -1,311 +1,396 @@
-# Plan — Fine-tune IndicTrans2 (dist-200M) and deploy to a low-power ARM device with minimal latency
+# Plan — Fine-tune, compress, and deploy IndicTrans2 (dist-200M) to a low-power ARM device
 
-> Goal: take `ai4bharat/indictrans2-en-indic-dist-200M`, **fine-tune it on our own
-> data**, package the trained model + full runtime into a **Docker image**, ship
-> that image to a **Raspberry-Pi-class device (dual-core, 2 GB RAM, 64-bit)** and
-> serve translations locally with **the lowest latency the hardware allows**.
+> Goal: take `ai4bharat/indictrans2-en-indic-dist-200M`, **fine-tune it (QLoRA)**,
+> squeeze it as small/fast as possible (**int8**, optional **structured pruning**),
+> package it into a **Podman** container image, ship that to a **Raspberry-Pi-class
+> device (dual-core, 2 GB RAM, 64-bit)**, and serve translations locally at **the
+> lowest latency the hardware allows**. ONNX Runtime is documented as an alternative
+> runtime to CTranslate2.
 
-All technical specifics below were verified against primary sources (AI4Bharat
-repo, CTranslate2 docs, PyPI, Docker docs) and adversarially fact-checked. Numbers
-marked **ESTIMATE** are order-of-magnitude planning figures — measure on the real
-device before trusting them.
-
----
-
-## 0. TL;DR of the whole pipeline
-
-```
-                 [ DEV MACHINE (x86-64 + GPU) ]                    [ RASPBERRY PI (aarch64, 2GB) ]
-  parallel data ─▶ fine-tune ─▶ merge ─▶ convert to ─▶ build arm64 ──push──▶ pull ─▶ docker run ─▶ warm
-   (en → xx)       (LoRA)      one model   CT2 int8      Docker image        (registry)   HTTP service (FastAPI)
-                                                                                          intra_threads=2, greedy
-```
-
-Latency target on 2 cores @ ~1.5 GHz: **~0.4–1.5 s per sentence (greedy, int8)** — ESTIMATE.
-Memory: int8 model + runtime ≈ **250–500 MB resident** — fits 2 GB comfortably.
+Every technical specific below was researched against primary sources (AI4Bharat
+repo, CTranslate2 / ONNX Runtime / optimum docs, PyPI, bitsandbytes/PEFT docs) and
+cross-checked. Numbers marked **ESTIMATE** are order-of-magnitude planning figures —
+measure on the real device. See §12 for a verification-confidence note.
 
 ---
 
-## 1. Target hardware & hard constraints
+## 0. Read this first — three corrections to the brief
+
+These reshape the plan, so they're up front (not to nitpick — to save you effort):
+
+1. **There is no "64-bit" model.** Transformer weights ship as **fp32 (32-bit)**,
+   or **fp16 (16-bit)** when loaded for GPU work. The right framing is *fp32/fp16 →
+   int8 for the Pi*, not "64→8".
+2. **QLoRA is 4-bit, and it's a *training* trick — not your deployment artifact.**
+   QLoRA = freeze the base in **4-bit NF4** (bitsandbytes) + train 16-bit LoRA
+   adapters, purely to fit the fine-tune in low VRAM. After you `merge_and_unload()`
+   you get an **fp16** model back (~400 MB) — *bigger and float again*. The small
+   **int8** artifact for the Pi is a **separate post-training conversion step**.
+   ("8-bit + QLoRA" is a contradiction; QLoRA is 4-bit. If you truly wanted 8-bit
+   *at train time* that's `load_in_8bit` LoRA, a different technique — not needed here.)
+3. **"Dynamically prune the weights that don't contribute" won't make it faster.**
+   That describes *unstructured/magnitude* pruning (zeroing individual weights). On a
+   dense CPU int8 backend it gives a **smaller file and identical latency** — neither
+   CTranslate2 nor ONNX Runtime's CPU path exploits unstructured sparsity (that needs
+   a specialized sparse engine like DeepSparse). **Only *structured* pruning** (dropping
+   whole attention heads / FFN neurons / layers) actually shrinks the dense math and
+   speeds up CPU inference. §5 uses structured pruning; treat it as optional/advanced.
+
+**Correct end-to-end ordering (memorize this):**
+```
+QLoRA 4-bit fine-tune ─▶ merge to fp16 ─▶ (optional) STRUCTURED prune + heal (float)
+                                                        │
+                                                        ▼
+                                          int8 conversion LAST (CT2 or ONNX) ─▶ ship
+```
+int8 goes **last** because pruning/healing need float weights; int8 is a deployment-only transform.
+
+---
+
+## 1. TL;DR pipeline
+
+```
+        [ DEV MACHINE (x86-64 + GPU) ]                              [ RASPBERRY PI (aarch64, 2GB) ]
+ data ─▶ QLoRA(4bit) ─▶ merge→fp16 ─▶ [opt] struct-prune+heal ─▶ int8 ─▶ build arm64 ──push──▶ pull ─▶ podman run
+ (en→xx)  (~0.8M         (one fp16      (fairseq retrain,          (CT2   Podman image      (registry) rootless +
+          trainable)     model)         decoder-depth cut)         primary) (+ manifest)               systemd quadlet
+```
+Runtime on 2 cores @ ~1.5 GHz: **~0.4–1.5 s/sentence** (int8, greedy) — ESTIMATE.
+RAM: int8 model + runtime ≈ **250–500 MB** resident; Podman adds **~0** persistent daemon RAM.
+
+---
+
+## 2. Target hardware & hard constraints
 
 | Constraint | Value | Consequence |
 |---|---|---|
-| CPU | ~2 cores, ~1.5 GHz, ARM | CPU-only inference; thread tuning matters a lot |
-| RAM | 2 GB | Single model, single worker; no PyTorch-at-runtime luxury |
-| OS | **MUST be 64-bit** (aarch64) | `uname -m` must return `aarch64`. 32-bit/armv7 has **no** ctranslate2 wheels → source build → pain. **Reflash to 64-bit Raspberry Pi OS first.** |
-| Accelerator | none (no CUDA) | int8 CPU inference via CTranslate2 |
+| CPU | ~2 cores, ~1.5 GHz, ARM | CPU-only; thread pinning matters a lot |
+| RAM | 2 GB | one model, one worker; no torch-at-runtime |
+| **OS** | **MUST be 64-bit (aarch64)** | `uname -m` → `aarch64`. 32-bit has **no** CT2 / ONNX Runtime wheels → source build. **Reflash to 64-bit first.** |
+| Accel | none | int8 CPU inference |
 
-> Note: most real Raspberry Pis are quad-core (Pi 4/5). If the device is actually a
-> Pi 4 (4×A72) or Pi 5 (4×A76 @2.4 GHz, has int8 SDOT/UDOT), it will be **faster**
-> than this 2-core planning assumption — the plan is conservative.
-
----
-
-## 2. THE key decision: how do we get a CT2 model from *our* fine-tuned weights?
-
-Low latency ⇒ we want **CTranslate2 int8**. But CT2 does **not** cleanly accept a
-fine-tuned HF IndicTrans2 model, because IndicTrans2 ships a *custom* architecture
-(`IndicTransForConditionalGeneration`, `trust_remote_code=True`) that the generic
-`ct2-transformers-converter` doesn't list among supported archs (M2M100/NLLB/Marian…).
-So there are three routes, with an explicit recommendation:
-
-| Route | Fine-tune with | → CT2? | Latency | Effort / risk |
-|---|---|---|---|---|
-| **A (recommended)** | **fairseq** (`finetune.sh`, arch `transformer_base18L`) | ✅ official `fairseq-ct2-converter` | 🟢 lowest (CT2 int8) | Heavier training setup, but the CT2 path is *supported* and reliable |
-| **B** | **HF LoRA** (`train_lora.sh`) → `merge_and_unload()` | ⚠️ HF→CT2 likely **fails** on custom arch | 🟢 if conversion works | Easiest training; **CT2 conversion is the gamble** — treat as experimental, verify against current CT2 release notes |
-| **C (fallback)** | **HF LoRA** → merge, **deploy merged HF model as-is** (PyTorch) | ❌ no CT2 | 🔴 highest, torch in 2 GB is tight | Simplest to get *working*, worst latency — only if A and B both stall |
-
-**Recommendation:** pursue **Route A (fairseq → CT2)** as the primary path because
-it is the only one where "fine-tuned" *and* "ultra-low-latency CT2 int8 on the Pi"
-are both guaranteed. Keep **Route B** as a quick experiment (it's cheap to try the
-HF LoRA fine-tune first since it's the friendlier workflow), and **Route C** as the
-guaranteed-works safety net if the CT2 conversion of custom weights proves impossible.
-
-> Reality check to do in Phase 0: attempt `fairseq-ct2-converter` on the *stock*
-> distilled fairseq checkpoint **before** investing in fine-tuning. If that
-> round-trips to a working CT2 model, Route A is confirmed viable end-to-end.
+> Most real Pis are quad-core (Pi 4/5). A Pi 5 (A76 @2.4 GHz, native int8 SDOT/UDOT)
+> is materially faster than this 2-core planning assumption — the plan is conservative.
 
 ---
 
-## 3. Phase 1 — Fine-tuning (on the dev machine with a GPU)
+## 3. Runtime decision: CTranslate2 (primary) vs ONNX Runtime (alternative)
 
-### 3a. Hardware to fine-tune
-- A single **12–16 GB GPU** is plenty (free Colab/Kaggle **T4 16 GB**, or RTX 3060 12 GB).
-  200M params, and LoRA trains only ~0.8 M params (~0.4%).
-- **CPU-only fine-tuning is impractical** (the `inverse_sqrt` schedule + long
-  `max_steps` assume GPU throughput). Use CPU only for a tiny smoke test.
+You asked for ONNX Runtime, so both are specified. But the honest ranking for this
+model on ARM:
 
-### 3b. Data format (parallel corpus)
-Line-aligned plain text, one sentence per line, in the layout the scripts expect:
+| | CTranslate2 (**recommended**) | ONNX Runtime (alternative) |
+|---|---|---|
+| Seq2seq latency on ARM CPU | 🟢 lowest — C++ greedy/beam + KV cache, **no per-token Python** | 🟡 higher — `ORTModelForSeq2SeqLM` runs `generate()` in Python, one `session.run` per token |
+| Memory | 🟢 int8 model ~100–200 MB | 🟡 higher (float activations, up to 3 graphs, full transformers stack) |
+| IndicTrans2 support | 🟢 **essentially solved** — AI4Bharat ships official CT2 ports; `fairseq-ct2-converter` works | 🔴 **custom-arch export required** (see §7b) |
+| int8 | `--quantization int8` (one flag, no calibration) | `quantize_dynamic` (U8S8+reduce_range on ARM, no calibration) |
+| aarch64 wheels | ✅ ctranslate2 4.8.x | ✅ onnxruntime 1.27.x |
+
+> **Key correction to an earlier assumption:** CT2 is **not** actually blocked for
+> IndicTrans2. Only the *HF-transformers* converter (`ct2-transformers-converter`)
+> fails on the custom arch. The **fairseq → CT2** route (`fairseq-ct2-converter`) is
+> official and works, and AI4Bharat even publishes pre-built CT2 dirs. So CT2 is both
+> the fastest *and* the lowest-effort path.
+
+**Recommendation:** make **CT2 the primary runtime**. Pursue **ONNX Runtime only** if
+you have a hard reason (an existing ORT-only serving stack, one runtime across many
+models, a needed ORT execution provider). §7 covers both.
+
+---
+
+## 4. Phase 1 — QLoRA fine-tuning (dev machine, GPU)
+
+### Hardware
+- One **12–16 GB GPU** (free Colab/Kaggle **T4 16 GB**, RTX 3060 12 GB). QLoRA 4-bit
+  makes this comfortable; you train only ~0.8 M LoRA params (~0.4% of the model).
+- CPU-only fine-tune is impractical (schedule assumes GPU throughput) — smoke-test only.
+
+### Data format (parallel corpus, line-aligned raw text)
 ```
 en-indic-exp/
-  train/eng_Latn-hin_Deva/train.eng_Latn   # English lines
-  train/eng_Latn-hin_Deva/train.hin_Deva   # aligned Hindi lines
-  dev/eng_Latn-hin_Deva/dev.eng_Latn
-  dev/eng_Latn-hin_Deva/dev.hin_Deva
+  train/eng_Latn-hin_Deva/train.eng_Latn   train.hin_Deva
+  dev/eng_Latn-hin_Deva/dev.eng_Latn       dev.hin_Deva
 ```
-- Language codes are FLORES-style: `eng_Latn` → `hin_Deva`, `tam_Taml`, `ben_Beng`, `tel_Telu`, …
-- **Feed RAW text.** `IndicProcessor` (from IndicTransToolkit) does Unicode
-  normalization, script unification, language tagging, and entity masking
-  *internally*, before tokenization. Do **not** pre-transliterate yourself — training
-  and inference must use the *same* IndicProcessor pass.
+- FLORES codes: `eng_Latn` → `hin_Deva`, `tam_Taml`, `ben_Beng`, `tel_Telu`, …
+- **Feed RAW text.** `IndicProcessor` (from IndicTransToolkit) does normalization,
+  script unification, language tagging, entity masking *internally*. Do not
+  pre-transliterate — training and inference must share the same IndicProcessor pass.
 
-### 3c. Route B (HF LoRA) — the easy first attempt
-From `IndicTrans2/huggingface_interface/`:
-```bash
-bash install.sh    # clones + installs IndicTransToolkit, peft, transformers, etc.
-bash train_lora.sh <data_dir> ai4bharat/indictrans2-en-indic-dist-200M <out_dir> \
-     "eng_Latn" "hin_Deva,tam_Taml,ben_Beng"
-```
-Verified defaults (from `train_lora.sh`): `batch_size 32`, `grad_accum 4`,
-`lr 2e-4`, `warmup 4000`, `inverse_sqrt`, `adamw_torch`, `weight_decay 0.01`,
-`save_steps 1000`, early-stop patience 10 on `eval_BLEU`.
-LoRA: `r=16, alpha=32, dropout=0.1, target_modules=[q_proj,k_proj], task=SEQ_2_SEQ_LM`.
-
-> **OOM warning:** `batch_size=32` will likely OOM a 16 GB T4 (activations dominate).
-> Drop to `--batch_size 8` (raise `--grad_accum_steps` to keep effective batch), or use
-> QLoRA 4-bit (unofficial). Hyperparameters are explicitly "may need tuning."
-
-### 3d. Merge to one deployable model (both routes need this)
-`train_lora.py` saves **adapters only** — it never merges, and **CT2 can't read
-adapters**. Merge first:
+### QLoRA setup
+Start from AI4Bharat's `IndicTrans2/huggingface_interface/` (`train_lora.py` is the
+supported HF fine-tune). Add 4-bit loading to make it QLoRA:
 ```python
-from transformers import AutoModelForSeq2SeqLM
+from transformers import BitsAndBytesConfig, AutoModelForSeq2SeqLM
+bnb = BitsAndBytesConfig(
+    load_in_4bit=True, bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype="bfloat16", bnb_4bit_use_double_quant=True,
+)
+base = AutoModelForSeq2SeqLM.from_pretrained(
+    "ai4bharat/indictrans2-en-indic-dist-200M",
+    trust_remote_code=True, quantization_config=bnb, device_map="auto",
+)
+```
+Verified LoRA config from `train_lora.py`: `r=16, lora_alpha=32, lora_dropout=0.1,
+target_modules=["q_proj","k_proj"], task_type="SEQ_2_SEQ_LM"`. Baseline HP (from
+`train_lora.sh`): `lr 2e-4`, `warmup 4000`, `inverse_sqrt`, `adamw_torch`,
+`weight_decay 0.01`, early-stop patience 10 on `eval_BLEU`.
+> **OOM note:** default `batch_size=32` will likely OOM a 16 GB T4 — drop to 8
+> (raise `grad_accum` to keep effective batch). Hyperparameters "may need tuning."
+
+---
+
+## 5. Phase 2 — Merge, and (optional) structured pruning
+
+### 5a. Merge adapters → single fp16 model (required)
+`train_lora.py` saves **adapters only**; CT2/ONNX can't read adapters. Merge — and
+**dequantize to fp16 first**, then merge (merging into a still-4-bit base degrades
+quality, since adapters were trained against dequantized weights):
+```python
 from peft import PeftModel
-base = AutoModelForSeq2SeqLM.from_pretrained(BASE_DIR, trust_remote_code=True)
-merged = PeftModel.from_pretrained(base, ADAPTER_DIR).merge_and_unload()
-merged.save_pretrained(FINAL_DIR)   # + tokenizer.save_pretrained(FINAL_DIR)
+base_fp16 = AutoModelForSeq2SeqLM.from_pretrained(BASE, trust_remote_code=True,
+                                                   torch_dtype="float16")
+merged = PeftModel.from_pretrained(base_fp16, ADAPTER_DIR).merge_and_unload()
+merged.save_pretrained(FINAL_DIR)     # ~400 MB fp16
 ```
-⚠️ Remember the earlier bug: `save_pretrained` writes vocab-file keys that break the
-tokenizer on reload. Reuse our `tokenizer_utils.load_indictrans_tokenizer` fallback,
-or snapshot the tokenizer files instead of `save_pretrained` for the tokenizer.
+⚠️ Reuse our `tokenizer_utils.load_indictrans_tokenizer` (the `save_pretrained`
+tokenizer reload bug we already hit).
 
-### 3e. Route A (fairseq) — the reliable-CT2 path
-From the main `IndicTrans2` repo:
-```bash
-bash prepare_data_joint_finetuning.sh <exp_dir>          # binarize
-bash finetune.sh <exp_dir> transformer_base18L <pretrained_ckpt>   # 18L = distilled arch
-```
-Produces a fairseq checkpoint that `fairseq-ct2-converter` can convert (Phase 2).
+### 5b. Structured pruning + heal (OPTIONAL — do this last, only if still too big/slow)
+**This is what you asked for, done correctly.** Recall from §0: unstructured/"dynamic"
+pruning = no CPU speedup. Use **structured** pruning.
+
+- **What actually pays off (verified insight):** decoder **depth** dominates
+  autoregressive latency; encoder **width** preserves quality. So the highest-yield
+  structured move is **shorten decoder layers** + modestly **narrow the encoder**,
+  not uniform pruning. (Ref: NASH, seq2seq structured pruning.)
+- **Tooling** (for a 200M encoder-decoder): `torch-pruning` (DepGraph — actually
+  shrinks tensors), HF `prune_heads` (needs `_prune_heads` hooks the custom arch may
+  lack — you'd patch them), NASH recipe. **Avoid** `torch.nn.utils.prune` (masks only,
+  no dense speedup), LLM-Pruner (decoder-only), Intel Neural Compressor's default
+  (produces *sparsity* for sparse runtimes, not dense shrink).
+- **Heal is mandatory:** structured pruning drops BLEU immediately → you must
+  fine-tune ("heal") on parallel data and re-check BLEU/chrF, then re-convert.
+- **Custom-arch constraint (important):** the CT2 converter assumes **uniform
+  topology** (same heads/FFN dim across layers). Heterogeneous per-layer pruning
+  **won't round-trip**. Constrain pruning to **converter-legal shapes**: uniform
+  per-layer head/FFN reductions + whole-layer drops.
+
+**Honest verdict:** for an *already-distilled* 200M, structured pruning has
+**diminishing returns** (distillation already spent the redundancy) and is high-effort
++ fragile through the custom arch. Expect maybe **~10–30%** further size/latency after
+healing — not transformative — at a measurable BLEU cost. **Do int8 + greedy first
+(§7, §9); only attempt pruning if you still need more.**
 
 ---
 
-## 4. Phase 2 — Convert to CTranslate2 int8
+## 6. Phase 3 — int8 conversion for the Pi (do LAST)
 
-### Route A (recommended)
-```bash
-pip install ctranslate2
-ct2-fairseq-converter \
-    --model_path <ft>/checkpoint_best.pt \
-    --data_dir   <ft>/final_bin \
-    --output_dir model_cache_ct2 \
-    --quantization int8
+### 6a. CTranslate2 (primary)
+- If you fine-tuned via **fairseq**: `ct2-fairseq-converter --model_path
+  checkpoint_best.pt --data_dir final_bin --output_dir model_cache_ct2
+  --quantization int8`.
+- If you fine-tuned via **HF QLoRA → merged fp16**: the HF→CT2 converter may reject
+  the custom arch (our `convert_ct2.py` already tries it and prints the fairseq
+  fallback). The reliable CT2 artifact comes from the **fairseq** side.
+- **Quantization:** use `int8`. On ARM it resolves to `int8_float32` (Ruy backend);
+  `int8_float16`/`int16` are **not** native on ARM and just fall back — no benefit.
+- Output `model_cache_ct2/` ≈ 100–200 MB.
+
+### 6b. ONNX Runtime (alternative — only if mandated)
+The `optimum-cli export onnx` CLI **fails** on IndicTrans2 (custom `model_type` not in
+optimum's registry — confirmed by an AI4Bharat HF discussion). The working route is
+the **Python API with a custom OnnxConfig**:
+```python
+from optimum.exporters.onnx import main_export
+from optimum.exporters.onnx.model_configs import M2M100OnnxConfig
+from optimum.utils import NormalizedTextConfig
+# IndicTrans2 ≈ M2M100 (sinusoidal pos-emb, enc/dec transformer) but fairseq attr names.
+# Subclass M2M100OnnxConfig; remap normalized attrs:
+#   hidden_size=encoder_embed_dim, num_attention_heads=encoder_attention_heads, ...
+main_export(MODEL_ID, output="onnx/", trust_remote_code=True, no_post_process=True,
+            task="text2text-generation-with-past",
+            custom_onnx_configs={"encoder_model": enc, "decoder_model": dec,
+                                 "decoder_with_past_model": dec_past})
 ```
-
-### Route B (experiment — may fail on custom arch)
-Reuse our existing `convert_ct2.py` (it already tries `ct2-transformers-converter
---trust_remote_code` and prints the fairseq fallback if it fails).
-
-**Quantization choice:** use `int8`. On ARM this resolves to `int8_float32` via the
-Ruy backend. `int8_float16` and `int16` are **not** natively supported on ARM (they
-fall back to int8_float32) — requesting them buys nothing.
-
-Output: a `model_cache_ct2/` directory (~200 MB) — this is what goes in the image.
+Then int8 with **`quantize_dynamic(..., weight_type=QInt8)`** (dynamic = **no
+calibration data**; use **U8S8 + `reduce_range`** on ARM). Caveats: `ORTModelForSeq2SeqLM`
+may `KeyError` on the unregistered `model_type` (register the normalized config or
+hand-write the decode loop), dynamic-quant seq2seq has known bugs (optimum #438), and
+quantizing the decoder can hurt MT quality — **re-validate BLEU/chrF**.
+> `IndicProcessor` + tokenizer stay in Python in **both** runtimes — they're
+> preprocessing, never in the ONNX/CT2 graph.
 
 ---
 
-## 5. Phase 3 — Build the ARM64 Docker image (on the dev machine)
+## 7. Phase 4 — Build the ARM64 image with **Podman** (dev machine)
 
-### Base & dependencies (all prebuilt aarch64 wheels — **no compilation**)
-- Base: **`python:3.11-slim`** (Debian bookworm, glibc 2.36). **Not** Alpine/musl —
-  manylinux wheels are glibc-only and would trigger a source build on musl.
-- `ctranslate2` **4.8.x** ships aarch64 manylinux wheels (glibc ≥2.27), CPU-only,
-  with OpenBLAS+Ruy statically bundled → no `apt` BLAS needed.
-- `sentencepiece`, `numpy` also ship aarch64 wheels.
-- **Pin exact versions** and never pass `--no-binary`, so pip can't fall back to an
-  sdist source build (that's the one thing that makes QEMU builds slow).
-- Requires **pip ≥ 20.3** in the image (PEP 600 tag support) — trivially satisfied by slim.
+Podman replaces Docker: **daemonless, rootless, same OCI images & Dockerfile**, and
+**~0 persistent RAM** on the Pi (no `dockerd`). Same `Containerfile`/`Dockerfile`.
 
-### Dockerfile sketch
+### Containerfile (identical content to a Dockerfile)
 ```dockerfile
 FROM python:3.11-slim
-ENV OMP_NUM_THREADS=2 CT2_INTER_THREADS=1 CT2_INTRA_THREADS=2
+ENV OMP_NUM_THREADS=2
 WORKDIR /app
 COPY requirements-docker.txt .
-RUN pip install --no-cache-dir -r requirements-docker.txt   # ct2, sentencepiece, IndicTransToolkit, fastapi, uvicorn
+RUN pip install --no-cache-dir -r requirements-docker.txt   # ctranslate2, sentencepiece, IndicTransToolkit, fastapi, uvicorn
 COPY app.py .
-# model in its own LATE layer so code changes reuse the cached ~200MB layer
-COPY model_cache_ct2/ /app/model_cache_ct2/
-COPY model_cache/indictrans2-en-indic-dist-200M/ /app/tokenizer/
+COPY model_cache_ct2/ /app/model_cache_ct2/          # int8 model, late layer (cache reuse)
+COPY tokenizer/ /app/tokenizer/                      # tokenizer files
 EXPOSE 8080
 HEALTHCHECK CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:8080/health')"
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8080","--workers","1"]
 ```
+- Base `python:3.11-slim` (glibc). **Not Alpine/musl** — manylinux wheels are
+  glibc-only; musl forces a slow source build.
+- **All deps are prebuilt aarch64 wheels** (ctranslate2 4.8.x, sentencepiece,
+  onnxruntime 1.27.x, numpy) → **no compilation**, even under emulation. **Pin
+  versions**, never `--no-binary` (an unpinned dep with no arm64 wheel silently
+  triggers a QEMU source build). Needs **pip ≥ 20.3** (PEP 600 tags) — slim satisfies it.
 
-### Cross-build for arm64 from x86 (buildx + QEMU)
+### Cross-build arm64 on x86 with Podman
 ```bash
-docker run --privileged --rm tonistiigi/binfmt --install arm64        # once per boot
-docker buildx create --name multi --driver docker-container --bootstrap
-docker buildx use multi
-docker buildx build --platform linux/arm64 -t <registry>/it2-ct2:latest --push .
+# one-time: register QEMU emulators for cross-arch
+podman run --rm --privileged docker.io/tonistiigi/binfmt --install arm64
+# build arm64 into a manifest, then push to a registry
+podman build --platform=linux/arm64 --manifest it2-ct2:latest .
+podman manifest push --all it2-ct2:latest docker://<registry>/it2-ct2:latest
 ```
-- A cross-platform image **cannot** be `--load`ed into the x86 daemon — it **must be
-  `--push`ed** to a registry, then pulled on the Pi.
-- Because everything is wheels, QEMU only *unpacks* wheels (no C++ compile) → build is
-  minutes, not hours. (The horror stories are about source builds.)
-- Alternative with zero emulation: **build natively on the Pi** (viable precisely
-  because nothing compiles).
+- A cross-arch image can't run on the x86 box; **push to a registry, pull on the Pi.**
+- Zero-emulation alternative: **build natively on the Pi** (viable — nothing compiles).
 
-### Model: bake in vs. mount
-**Bake it in** (recommended for a single-purpose Pi appliance): one immutable
-artifact, `docker run` needs nothing else, easy rollback by tag. Cost: image +200 MB,
-model updates need a rebuild+repush. Put the `COPY model_...` in a late layer.
-Use a **mounted volume** (`-v /srv/models:/models:ro`) only if you expect frequent
-model swaps.
-
-**Image size (ESTIMATE):** ~250–300 MB without model / **~450–500 MB with model baked**
-(~330–360 MB compressed in the registry).
+### Model: bake in vs mount
+**Bake it in** for a single-purpose Pi appliance (immutable, one-command deploy;
+`COPY` the model in a late layer for cache reuse). Use a mounted volume
+(`-v /srv/models:/models:ro`) only if you swap models often.
+**Image size (ESTIMATE):** ~250–300 MB without model / **~450–500 MB with int8 model baked**.
 
 ---
 
-## 6. Phase 4 — Run on the Pi
+## 8. Phase 5 — Run on the Pi (rootless Podman + systemd)
 
 ```bash
-docker run -d --name it2 --restart unless-stopped \
-  --cpus 2 --memory 1500m --memory-swap 1500m \
-  -p 8080:8080 <registry>/it2-ct2:latest
+podman pull <registry>/it2-ct2:latest
+podman run -d --name it2 --restart unless-stopped \
+  --cpus 2 --memory 1500m -p 8080:8080 <registry>/it2-ct2:latest
 ```
-- **Long-lived HTTP service, not one-shot CLI** — load the ~200 MB model **once** at
-  startup and keep it warm. A CLI would pay the load cost every request.
-- **Single uvicorn worker.** On 2 GB, each extra worker duplicates the model in RAM →
-  OOM. Get parallelism from CT2 threads, not processes.
-- Cap memory ~1.5 GB to leave OS headroom; `--restart unless-stopped` survives reboots.
+- **Long-lived HTTP service, not one-shot CLI** — load the model **once** at startup,
+  keep it warm (a CLI pays the ~200 MB load every request).
+- **Single uvicorn worker.** On 2 GB each extra worker duplicates the model → OOM.
+  Get parallelism from CT2 threads, not processes.
+
+**Auto-start across reboots — the Podman-native way (Quadlet):** drop
+`~/.config/containers/systemd/it2.container`:
+```ini
+[Container]
+Image=<registry>/it2-ct2:latest
+PublishPort=8080:8080
+Environment=OMP_NUM_THREADS=2
+[Service]
+Restart=always
+[Install]
+WantedBy=default.target
+```
+then `systemctl --user daemon-reload && systemctl --user start it2`. (Enable
+`loginctl enable-linger $USER` so the rootless service runs without an active login.)
+This is the "much lower RAM than Docker" path you wanted: no daemon, systemd supervises.
 
 ---
 
-## 7. Phase 5 — Latency optimization (the "very less latency" part)
+## 9. Phase 6 — Latency optimization (the "very less latency" part)
 
 ### Threading (biggest structural lever on 2 cores)
-- `ctranslate2.Translator(model, device="cpu", compute_type="int8",
-  inter_threads=1, intra_threads=2)` and `OMP_NUM_THREADS=2`.
-- Rule from CT2 docs: `inter_threads * intra_threads ≤ physical cores`. For **lowest
-  single-sentence latency**, put all cores on one translation → `1 × 2`.
-- (Only if you optimize for *throughput* over many concurrent requests would you flip
-  to `inter_threads=2, intra_threads=1` — that raises per-sentence latency, so don't.)
+`ctranslate2.Translator(model, device="cpu", compute_type="int8",
+inter_threads=1, intra_threads=2)` + `OMP_NUM_THREADS=2`.
+Rule: `inter_threads * intra_threads ≤ physical cores`. For lowest single-sentence
+latency, put both cores on one translation → **1 × 2**. (Flip to `2 × 1` only if you
+optimize for throughput over many concurrent requests — that raises per-sentence latency.)
 
-### Decoding settings (per-request)
-- **`beam_size=1` (greedy)** — the single biggest latency win vs the default beam=5.
-  Small quality cost; measure BLEU on your dev set to confirm it's acceptable.
-- **`return_scores=False`** — lets CT2 skip the final softmax each step under greedy.
-- **Cap `max_decoding_length`** (~1.5–2× expected output length) so runaway/looping
-  generations can't blow latency.
-- **`max_input_length`** to bound encoder cost; split paragraphs into sentences.
-- **`batch=1`** for single-sentence latency; only batch when many sentences arrive,
-  then `max_batch_size` with `batch_type="tokens"` and the iterable API (sorts by length).
-- Keep the model **warm/resident**; disable unused features (no sampling, no
-  `return_alternatives`, minimal repetition penalties).
+### Decoding settings (per request)
+- **`beam_size=1` (greedy)** — the single biggest latency win vs default beam=5.
+  Measure BLEU to confirm the quality drop is acceptable.
+- **`return_scores=False`** under greedy (skips a per-step softmax).
+- **Cap `max_decoding_length`** (~1.5–2× expected output) so runaways can't blow latency.
+- **`max_input_length`**; split paragraphs into sentences (latency ∝ tokens generated).
+- **`batch=1`** for single-sentence latency; batch only when many arrive
+  (`max_batch_size`, `batch_type="tokens"`, iterable API sorts by length).
+- Keep the model **warm/resident**; disable sampling/alternatives/scoring you don't use.
 
-### Realistic expectations (ESTIMATE — verify on device)
-| Sentence length | Latency (greedy, int8, 2 cores @1.5 GHz) |
+### Expectations (ESTIMATE — measure on device)
+| Sentence | Latency (int8, greedy, 2 cores @1.5 GHz) |
 |---|---|
-| short (~10 out tokens) | ~0.2–0.4 s |
-| typical (~20–30 tokens) | ~0.4–1.5 s |
-| long (50+ tokens) | ~2–3 s |
-- Basis: ~15–60 ms/output token on Pi-class CPU; single-stream decode is
-  **memory-bandwidth bound** (~90–100 MB int8 weights streamed per token). Beam search
-  would multiply this; Pi thermal throttling and SD-card cold-start also matter.
-- **Memory:** ~250–500 MB resident at batch=1 — comfortable in 2 GB.
+| short (~10 tok) | ~0.2–0.4 s |
+| typical (~20–30 tok) | ~0.4–1.5 s |
+| long (50+ tok) | ~2–3 s |
+- Single-stream decode is **memory-bandwidth bound** (~90–100 MB int8 weights streamed
+  per token). Beam search multiplies this. Pi thermal throttling + SD-card cold start matter.
+- **RAM:** ~250–500 MB resident at batch=1 — comfortable in 2 GB. Podman daemonless ⇒ no extra idle RAM.
 
-### If you need it faster still (stretch options)
-- Shorter outputs / sentence-splitting (latency ∝ tokens generated).
-- Distill/prune further or reduce vocab (advanced; changes the model).
-- A Pi 5 (A76 @2.4 GHz, native int8 dot-product) is materially faster than the 2-core assumption.
-
----
-
-## 8. Consolidated risks & gotchas
-
-1. **HF→CT2 conversion of custom IndicTrans2 arch likely fails** → primary path is
-   fairseq→CT2 (Route A). *Validate in Phase 0 before fine-tuning.*
-2. **32-bit OS = no wheels.** Pi must run **64-bit** Raspberry Pi OS (`uname -m` → `aarch64`).
-3. **Alpine/musl base = source build.** Use `python:3.11-slim` (glibc).
-4. **`train_lora.py` saves adapters only** — you must `merge_and_unload()` (CT2 can't read adapters).
-5. **`batch_size=32` OOMs a T4** — drop to 8–16 or QLoRA 4-bit.
-6. **`save_pretrained` tokenizer bug** (already hit) — reuse `tokenizer_utils` fallback / snapshot tokenizer files.
-7. **Cross-platform image must be `--push`ed**, not `--load`ed, from x86.
-8. **Single worker on 2 GB** — never multi-worker; scale via CT2 threads.
-9. **Pin deps, no `--no-binary`** — one unpinned dep lacking an arm64 wheel silently triggers a slow QEMU source build.
-10. **Greedy vs beam is a quality/latency tradeoff** — measure BLEU before committing to greedy in production.
+### Ordered ROI of the optimizations you asked for
+1. 🟢 **int8 quantization** (CT2 `--quantization int8`) — ~4× smaller, ~3–4× faster, one flag.
+2. 🟢 **greedy + capped decode length** — biggest autoregressive-latency lever.
+3. 🟢 **already using dist-200M** (not the 1B) — the largest win, already taken.
+4. 🟡 **QLoRA** — enables *fine-tuning* cheaply; **neutral** on inference latency.
+5. 🔴 **structured pruning** — last resort, ~10–30% more, high effort + BLEU cost + custom-arch fragility.
+6. ⚪ **unstructured/"dynamic" pruning** — **skip**: no CPU speedup on this stack.
 
 ---
 
-## 9. Deliverables to build (scripts/files)
+## 10. Consolidated risks & gotchas
+
+1. **32-bit OS = no wheels** (CT2 *and* ONNX Runtime). Pi must be **64-bit** (`uname -m`→`aarch64`).
+2. **HF→CT2 conversion fails on custom arch** → use the **fairseq→CT2** route (official).
+3. **optimum-cli ONNX export fails on custom arch** → Python `main_export` + custom OnnxConfig (§6b).
+4. **QLoRA ≠ deployment size** — merge to fp16, then int8 separately; never ship the 4-bit object.
+5. **Merge into fp16, not 4-bit** — dequantize base first or quality drops.
+6. **Unstructured pruning gives no CPU speedup** — structured only, and heal after.
+7. **Structured pruning must stay converter-legal** (uniform shapes) or it won't round-trip to CT2.
+8. **Alpine/musl base = source build** — use `python:3.11-slim`.
+9. **Cross-arch image must be pushed**, not run on x86; pin deps, never `--no-binary`.
+10. **Single worker on 2 GB**; parallelism via CT2 threads.
+11. **`save_pretrained` tokenizer bug** — reuse `tokenizer_utils` fallback.
+12. **Re-validate BLEU/chrF** after *every* lossy step (greedy, int8, pruning).
+
+---
+
+## 11. Deliverables to build
 
 | File | Purpose | Status |
 |---|---|---|
-| `finetune_lora.sh` / notebook | wrap AI4Bharat `train_lora.sh` for our data (Route B) | to build |
-| `merge_lora.py` | `merge_and_unload()` → single HF model dir | to build |
-| `convert_ct2.py` | HF→CT2 attempt + fairseq fallback message | ✅ exists |
-| (Route A) fairseq fine-tune + `ct2-fairseq-converter` runbook | reliable CT2 artifact | to build |
-| `app.py` | FastAPI service: warm CT2 model, `/translate`, `/health` | to build |
-| `requirements-docker.txt` | pinned arm64 deps (ct2, sentencepiece, IndicTransToolkit, fastapi, uvicorn) | to build |
-| `Dockerfile` | arm64 image, model baked in late layer | to build |
-| `build_arm64.sh` | buildx + QEMU cross-build + push | to build |
-| `translate_ct2.py` | local CLI sanity check (compare vs PyTorch `translate.py`) | ✅ exists |
+| `finetune_qlora.py` | QLoRA (4-bit) wrapper over AI4Bharat `train_lora` for our data | to build |
+| `merge_lora.py` | dequant→fp16, `merge_and_unload()` → single model dir | to build |
+| `prune_structured.py` *(optional)* | torch-pruning decoder-depth/encoder-width, converter-legal shapes | to build |
+| `convert_ct2.py` | HF→CT2 attempt + fairseq fallback | ✅ exists |
+| `export_onnx.py` *(alternative)* | custom-OnnxConfig `main_export` + `quantize_dynamic` | to build |
+| `app.py` | FastAPI: warm CT2 (or ORT) model, `/translate`, `/health` | to build |
+| `requirements-docker.txt` | pinned arm64 deps | to build |
+| `Containerfile` | arm64 image (Podman/Docker-compatible) | to build |
+| `build_arm64.sh` | `podman build --platform --manifest` + push | to build |
+| `it2.container` | systemd **Quadlet** unit for auto-start on the Pi | to build |
+| `translate_ct2.py` | local CLI sanity check vs PyTorch `translate.py` | ✅ exists |
 
 ---
 
-## 10. Suggested sequencing (milestones)
+## 12. Sequencing (milestones)
 
-- **M0 — Feasibility (½ day):** confirm fairseq→CT2 round-trips on the *stock* distilled
-  checkpoint; confirm 64-bit OS on the Pi; A/B CT2 vs torch latency on the Pi with the stock model.
-- **M1 — Fine-tune (1–2 days):** prep data, run HF LoRA (Route B) as the easy first cut, `merge_and_unload()`, sanity-check BLEU.
-- **M2 — CT2 artifact (½ day):** convert merged model (Route B) *or* fairseq checkpoint (Route A) to int8; validate output vs PyTorch.
-- **M3 — Containerize (1 day):** `app.py` warm service, Dockerfile, buildx arm64, push to registry.
-- **M4 — Deploy & tune (1 day):** run on Pi, set threads/greedy/limits, **measure real latency**, iterate.
+- **M0 — Feasibility (½ day):** confirm 64-bit Pi OS; confirm **fairseq→CT2** round-trips
+  on the *stock* dist-200M; A/B **CT2-int8 vs ORT-int8** latency on the Pi with the stock model.
+- **M1 — QLoRA fine-tune (1–2 days):** data prep, 4-bit LoRA train, merge→fp16, BLEU check.
+- **M2 — int8 artifact (½ day):** CT2 `--quantization int8` (fairseq route); validate output vs PyTorch.
+- **M3 — Containerize with Podman (1 day):** `app.py`, Containerfile, `podman build --manifest`, push.
+- **M4 — Deploy & tune (1 day):** rootless Podman + Quadlet on the Pi, set threads/greedy/limits, **measure real latency**.
+- **M5 — (optional) structured pruning:** only if M4 latency/size still insufficient; prune decoder depth + heal + re-convert + re-benchmark.
 
 ---
 
-*Prepared from source-verified research (AI4Bharat IndicTrans2 repo, CTranslate2 docs,
-PyPI, Docker multi-platform docs). Figures marked ESTIMATE are planning-grade — the
-one number that matters most, on-device latency, must be measured on the actual Pi.*
+### Verification confidence note
+The ONNX / pruning / quantization findings here come from a focused research pass with
+primary-source citations (optimum & ONNX Runtime docs, CTranslate2 docs, bitsandbytes/
+PEFT, pruning literature, AI4Bharat repo). The two **adversarial-verification** agents
+that would have double-checked the ONNX-export and pruning claims **did not complete
+(session limit)**, so treat those two as single-pass research-grade. The load-bearing
+practical claims (CT2 fairseq route works; optimum CLI fails but `main_export` works;
+unstructured pruning gives no dense CPU speedup; QLoRA is 4-bit/training-only) are each
+backed by cited sources. The one number that matters most — on-device latency — must be
+measured on the actual Pi regardless.
