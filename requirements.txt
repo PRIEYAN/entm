@@ -1,11 +1,14 @@
 # IndicTrans2 (en-indic distilled 200M) — local inference dependencies
 #
-# transformers must be <5.0.0: the model ships a custom (remote) tokenizer and
-# the "translation" pipeline, both of which were removed in transformers v5.
-transformers<5.0.0
+# transformers: the model ships a custom (remote) tokenizer. Newer transformers
+# (4.53+ / v5) break its __init__ with a "multiple values for 'src_vocab_file'"
+# TypeError. IndicTransToolkit is validated against >=4.51, so pin to that window.
+transformers>=4.51,<4.53
 torch
 sentencepiece
 sacremoses
+# required by the model's SentencePiece-based remote tokenizer
+protobuf
 # IndicProcessor (pre/post-processing) lives here. Installed from GitHub because
 # it is not published on PyPI. See download_model.py for the install command.
 # IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git

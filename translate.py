@@ -51,11 +51,44 @@ def resolve_model_path() -> str:
     return MODEL_ID
 
 
+def load_tokenizer(path):
+    """Load the model's remote tokenizer, tolerating a known version quirk.
+
+    Some transformers versions trip a "got multiple values for keyword argument
+    'src_vocab_file'" TypeError inside the model's remote tokenizer __init__,
+    which then gets masked by a misleading protobuf ImportError. If that happens,
+    reload from the resolved tokenizer class and hand it the vocab files by
+    keyword only, so nothing is passed positionally.
+    """
+    try:
+        return AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    except (TypeError, ImportError) as exc:
+        print(f"[warn] default tokenizer load failed ({exc}); retrying explicitly.")
+
+    from transformers.models.auto.tokenization_auto import get_tokenizer_config
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    config = get_tokenizer_config(path, trust_remote_code=True)
+    auto_map = config.get("auto_map", {})
+    ref = auto_map.get("AutoTokenizer")
+    if isinstance(ref, (list, tuple)):
+        ref = ref[0]
+    if not ref:
+        raise RuntimeError(
+            "Could not locate the remote tokenizer class in tokenizer_config.json"
+        )
+
+    tok_cls = get_class_from_dynamic_module(ref, path, trust_remote_code=True)
+    # Pass every vocab file by keyword so the class never receives one both
+    # positionally and by keyword (the source of the src_vocab_file collision).
+    return tok_cls.from_pretrained(path, trust_remote_code=True)
+
+
 def load():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     path = resolve_model_path()
 
-    tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    tokenizer = load_tokenizer(path)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         path,
         trust_remote_code=True,
