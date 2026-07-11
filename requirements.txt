@@ -9,6 +9,8 @@ sentencepiece
 sacremoses
 # required by the model's SentencePiece-based remote tokenizer
 protobuf
+# for snapshot_download in download_model.py
+huggingface_hub
 # IndicProcessor (pre/post-processing) lives here. Installed from GitHub because
 # it is not published on PyPI. See download_model.py for the install command.
 # IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git

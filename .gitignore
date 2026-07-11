@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 # downloaded model weights — re-download on each machine, don't commit
 model_cache/
+# CTranslate2 int8 output — regenerate with convert_ct2.py, don't commit
+model_cache_ct2/
