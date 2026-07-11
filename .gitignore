@@ -3,5 +3,12 @@ __pycache__/
 *.pyc
 # downloaded model weights — re-download on each machine, don't commit
 model_cache/
-# CTranslate2 int8 output — regenerate with convert_ct2.py, don't commit
+# CTranslate2 int8 output — regenerate with it2edge.convert.convert_ct2, don't commit
 model_cache_ct2/
+# fine-tune / conversion artifacts — regenerate from the pipeline, don't commit
+lora_adapters/
+model_cache_merged/
+model_cache_pruned/
+onnx_model/
+# tokenizer/ is staged into the image by build_arm64.sh from the snapshot
+tokenizer/

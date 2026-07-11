@@ -356,19 +356,22 @@ optimize for throughput over many concurrent requests — that raises per-senten
 
 ## 11. Deliverables to build
 
+Organized into the `it2edge` package (grouped by stage) + `deploy/` + `requirements/`.
+
 | File | Purpose | Status |
 |---|---|---|
-| `finetune_qlora.py` | QLoRA (4-bit) wrapper over AI4Bharat `train_lora` for our data | to build |
-| `merge_lora.py` | dequant→fp16, `merge_and_unload()` → single model dir | to build |
-| `prune_structured.py` *(optional)* | torch-pruning decoder-depth/encoder-width, converter-legal shapes | to build |
-| `convert_ct2.py` | HF→CT2 attempt + fairseq fallback | ✅ exists |
-| `export_onnx.py` *(alternative)* | custom-OnnxConfig `main_export` + `quantize_dynamic` | to build |
-| `app.py` | FastAPI: warm CT2 (or ORT) model, `/translate`, `/health` | to build |
-| `requirements-docker.txt` | pinned arm64 deps | to build |
-| `Containerfile` | arm64 image (Podman/Docker-compatible) | to build |
-| `build_arm64.sh` | `podman build --platform --manifest` + push | to build |
-| `it2.container` | systemd **Quadlet** unit for auto-start on the Pi | to build |
-| `translate_ct2.py` | local CLI sanity check vs PyTorch `translate.py` | ✅ exists |
+| `it2edge/train/finetune_qlora.py` | QLoRA (4-bit) wrapper over AI4Bharat `train_lora` for our data | ✅ built |
+| `it2edge/train/merge_lora.py` | dequant→fp16, `merge_and_unload()` → single model dir | ✅ built |
+| `it2edge/train/prune_structured.py` *(optional)* | torch-pruning decoder-depth/encoder-width, converter-legal shapes | ✅ built |
+| `it2edge/convert/convert_ct2.py` | HF→CT2 attempt + fairseq fallback | ✅ built |
+| `it2edge/convert/export_onnx.py` *(alternative)* | custom-OnnxConfig `main_export` + `quantize_dynamic` | ✅ built |
+| `it2edge/serve/app.py` | FastAPI: warm CT2 (or ORT) model, `/translate`, `/health` | ✅ built |
+| `it2edge/paths.py` | project-relative paths + model id (single source of truth) | ✅ built |
+| `requirements/docker.txt` | pinned arm64 deps | ✅ built |
+| `deploy/Containerfile` | arm64 image (Podman/Docker-compatible) | ✅ built |
+| `deploy/build_arm64.sh` | `podman build --platform --manifest` + push | ✅ built |
+| `deploy/it2.container` | systemd **Quadlet** unit for auto-start on the Pi | ✅ built |
+| `it2edge/serve/translate_ct2.py` | local CLI sanity check vs PyTorch `translate.py` | ✅ built |
 
 ---
 

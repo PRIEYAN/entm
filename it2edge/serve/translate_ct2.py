@@ -5,7 +5,7 @@ It uses the light `ctranslate2` CPU runtime for the model, and keeps the HF
 tokenizer + IndicProcessor (from IndicTransToolkit) for pre/post-processing,
 exactly like translate.py -- but with no torch dependency.
 
-Prereqs on the Pi (see requirements-pi.txt):
+Prereqs on the Pi (see requirements/pi.txt):
     pip install ctranslate2 transformers sentencepiece sacremoses protobuf
     pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
 
@@ -13,11 +13,11 @@ Layout it expects (copied from the dev machine):
     ./model_cache_ct2/                              (int8 CT2 weights)
     ./model_cache/indictrans2-en-indic-dist-200M/   (tokenizer files)
 
-Usage:
-    python translate_ct2.py "Hello, how are you?"             # -> Hindi
-    python translate_ct2.py --tgt tam_Taml "This is a test."  # -> Tamil
-    python translate_ct2.py --beams 5 "Slower, higher quality."
-    python translate_ct2.py                                   # built-in demo
+Usage (run from the project root):
+    python -m it2edge.serve.translate_ct2 "Hello, how are you?"             # -> Hindi
+    python -m it2edge.serve.translate_ct2 --tgt tam_Taml "This is a test."  # -> Tamil
+    python -m it2edge.serve.translate_ct2 --beams 5 "Slower, higher quality."
+    python -m it2edge.serve.translate_ct2                                   # built-in demo
 
 Greedy decoding (beam_size=1) is the default: on a Pi 3 it is several times
 faster than beam search for a small, usually acceptable quality drop.
@@ -30,7 +30,7 @@ raw-CT2 token round-trip here has not been run end to end. If translations come
 out empty, in the wrong language, or garbled, the likely culprit is target-token
 handling -- try adding target_prefix=[[tgt_token]] to translate_batch, or append
 the tokenizer's eos to each source_tokens list. Sanity-check a known sentence
-against translate.py (the PyTorch path) before relying on this on the Pi.
+against `it2edge.serve.translate` (the PyTorch path) before relying on this on the Pi.
 """
 
 import argparse
@@ -38,7 +38,8 @@ import os
 
 import ctranslate2
 
-from tokenizer_utils import load_indictrans_tokenizer
+from it2edge.paths import CT2_DIR, HF_SNAPSHOT
+from it2edge.tokenizer_utils import load_indictrans_tokenizer
 
 try:
     from IndicTransToolkit.processor import IndicProcessor
@@ -48,9 +49,8 @@ except ImportError as exc:  # pragma: no cover - guidance for a missing dep
         "    pip install git+https://github.com/VarunGumma/IndicTransToolkit.git"
     ) from exc
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-CT2_DIR = os.path.join(HERE, "model_cache_ct2")
-TOKENIZER_DIR = os.path.join(HERE, "model_cache", "indictrans2-en-indic-dist-200M")
+DEFAULT_CT2_DIR = str(CT2_DIR)
+DEFAULT_TOKENIZER_DIR = str(HF_SNAPSHOT)
 SRC_LANG = "eng_Latn"
 
 
@@ -58,8 +58,8 @@ def load(model_dir: str, tokenizer_dir: str):
     if not os.path.isdir(model_dir):
         raise SystemExit(
             f"CT2 model not found at {model_dir}.\n"
-            "Convert it on your dev machine with convert_ct2.py and copy it here,\n"
-            "or pass --model_dir pointing at your CT2 directory."
+            "Convert it on your dev machine with `python -m it2edge.convert.convert_ct2`\n"
+            "and copy it here, or pass --model_dir pointing at your CT2 directory."
         )
     if not os.path.isdir(tokenizer_dir):
         raise SystemExit(
@@ -132,9 +132,11 @@ def main() -> None:
         default=1,
         help="beam size; 1 = greedy (fastest, default). Try 5 for best quality.",
     )
-    parser.add_argument("--model_dir", default=CT2_DIR, help="CT2 model directory")
     parser.add_argument(
-        "--tokenizer_dir", default=TOKENIZER_DIR, help="HF tokenizer directory"
+        "--model_dir", default=DEFAULT_CT2_DIR, help="CT2 model directory"
+    )
+    parser.add_argument(
+        "--tokenizer_dir", default=DEFAULT_TOKENIZER_DIR, help="HF tokenizer directory"
     )
     args = parser.parse_args()
 

@@ -2,14 +2,14 @@
 
 RUN THIS ON YOUR DEV MACHINE (x86-64, e.g. this Windows box), NOT on the Pi.
 It produces a small int8 CTranslate2 model directory that you then copy to a
-64-bit Raspberry Pi and run with translate_ct2.py -- no PyTorch needed there.
+64-bit Raspberry Pi and run with it2edge.serve.translate_ct2 -- no PyTorch there.
 
 Why: a 200M model in fp32 is ~800 MB and needs PyTorch, which is too heavy for
 a 1 GB Pi 3. The int8 CTranslate2 package is ~200 MB and runs on the light
 ctranslate2 CPU runtime, which has aarch64 wheels (64-bit Raspberry Pi OS).
 
     pip install ctranslate2 transformers sentencepiece protobuf
-    python convert_ct2.py            # writes ./model_cache_ct2/
+    python -m it2edge.convert.convert_ct2    # writes ./model_cache_ct2/
 
 Then copy BOTH of these to the Pi:
     - model_cache_ct2/                         (the CT2 int8 weights)
@@ -23,15 +23,16 @@ recognise IndicTrans2's, conversion will fail. If that happens, this script
 prints the official fairseq -> CT2 fallback route instead of dying silently.
 """
 
+import argparse
 import os
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL_ID = "ai4bharat/indictrans2-en-indic-dist-200M"
-# The self-contained HF copy saved by download_model.py (preferred), else hub id.
-LOCAL_HF_DIR = os.path.join(HERE, "model_cache", "indictrans2-en-indic-dist-200M")
-OUTPUT_DIR = os.path.join(HERE, "model_cache_ct2")
+from it2edge.paths import CT2_DIR, HF_SNAPSHOT, MERGED_DIR, MODEL_ID
+
+LOCAL_HF_DIR = str(HF_SNAPSHOT)
+MERGED_MODEL_DIR = str(MERGED_DIR)
+OUTPUT_DIR = str(CT2_DIR)
 
 FALLBACK_MSG = f"""
 [!] The Hugging Face -> CTranslate2 conversion failed. This usually means the
@@ -43,31 +44,51 @@ FALLBACK_MSG = f"""
          The distilled en-indic download already contains 2 CT-ported dirs.
       2. Or convert a fairseq checkpoint yourself with the fairseq converter:
              https://opennmt.net/CTranslate2/guides/fairseq.html
-      3. Copy the resulting CT2 dir to the Pi and point translate_ct2.py at it
-         via --model_dir.
+      3. Copy the resulting CT2 dir to the Pi and point it2edge.serve.translate_ct2
+         at it via --model_dir.
 """
 
 
-def resolve_source() -> str:
+def resolve_source(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    # Prefer a fine-tuned + merged model over the stock snapshot (plan §6a).
+    if os.path.isdir(MERGED_MODEL_DIR):
+        print(f"[info] using merged fine-tuned model at {MERGED_MODEL_DIR}")
+        return MERGED_MODEL_DIR
     if os.path.isdir(LOCAL_HF_DIR):
         return LOCAL_HF_DIR
     print(f"[warn] {LOCAL_HF_DIR} not found; converting straight from the hub.")
-    print("       (Run download_model.py first to avoid a re-download.)")
+    print("       (Run `python -m it2edge.download_model` first to avoid a re-download.)")
     return MODEL_ID
 
 
 def main() -> None:
-    if os.path.isdir(OUTPUT_DIR):
+    parser = argparse.ArgumentParser(
+        description="Convert IndicTrans2 (HF) to a CTranslate2 int8 package"
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="model path/id to convert (default: merged, else stock snapshot, else hub)",
+    )
+    parser.add_argument("--output_dir", default=OUTPUT_DIR, help="CT2 output directory")
+    # On ARM int8 resolves to int8_float32 (Ruy); int8_float16/int16 just fall
+    # back with no benefit -- so int8 is the right default (plan §6a).
+    parser.add_argument("--quantization", default="int8")
+    args = parser.parse_args()
+
+    if os.path.isdir(args.output_dir):
         raise SystemExit(
-            f"{OUTPUT_DIR} already exists. Remove it first to re-convert."
+            f"{args.output_dir} already exists. Remove it first to re-convert."
         )
 
-    source = resolve_source()
+    source = resolve_source(args.model)
     cmd = [
         "ct2-transformers-converter",
         "--model", source,
-        "--output_dir", OUTPUT_DIR,
-        "--quantization", "int8",
+        "--output_dir", args.output_dir,
+        "--quantization", args.quantization,
         # IndicTrans2 needs its remote code to load the custom classes.
         "--trust_remote_code",
     ]
@@ -84,8 +105,9 @@ def main() -> None:
         print(FALLBACK_MSG, file=sys.stderr)
         raise SystemExit(1)
 
-    print(f"\n[ok] int8 CTranslate2 model written to: {OUTPUT_DIR}")
-    print("     Copy it (and the tokenizer dir) to the Pi, then run translate_ct2.py.")
+    print(f"\n[ok] int8 CTranslate2 model written to: {args.output_dir}")
+    print("     Copy it (and the tokenizer dir) to the Pi, then run "
+          "`python -m it2edge.serve.translate_ct2`.")
 
 
 if __name__ == "__main__":

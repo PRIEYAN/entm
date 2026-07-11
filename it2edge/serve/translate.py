@@ -3,15 +3,15 @@
 English -> Indic-language translation. Loads the model saved by download_model.py
 (falls back to the HF hub id if the local copy is absent), then translates.
 
-Usage:
+Usage (run from the project root):
     # translate a one-off sentence (default target: Hindi)
-    python translate.py "Hello, how are you?"
+    python -m it2edge.serve.translate "Hello, how are you?"
 
     # pick a target language by its IndicTrans2 code
-    python translate.py --tgt tam_Taml "This is a test sentence."
+    python -m it2edge.serve.translate --tgt tam_Taml "This is a test sentence."
 
     # no args -> runs a small built-in demo across a few languages
-    python translate.py
+    python -m it2edge.serve.translate
 
 Common target codes: hin_Deva (Hindi), tam_Taml (Tamil), tel_Telu (Telugu),
 ben_Beng (Bengali), mar_Deva (Marathi), guj_Gujr (Gujarati), kan_Knda (Kannada),
@@ -20,12 +20,12 @@ Source is always eng_Latn for this en-indic model.
 """
 
 import argparse
-import os
 
 import torch
 from transformers import AutoModelForSeq2SeqLM
 
-from tokenizer_utils import load_indictrans_tokenizer
+from it2edge.paths import HF_SNAPSHOT, MODEL_ID
+from it2edge.tokenizer_utils import load_indictrans_tokenizer
 
 try:
     from IndicTransToolkit.processor import IndicProcessor
@@ -35,21 +35,15 @@ except ImportError as exc:  # pragma: no cover - guidance for a missing dep
         "    pip install git+https://github.com/VarunGumma/IndicTransToolkit.git"
     ) from exc
 
-MODEL_ID = "ai4bharat/indictrans2-en-indic-dist-200M"
-LOCAL_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "model_cache",
-    "indictrans2-en-indic-dist-200M",
-)
 SRC_LANG = "eng_Latn"
 
 
 def resolve_model_path() -> str:
     """Prefer the offline copy; fall back to the hub id (needs internet)."""
-    if os.path.isdir(LOCAL_DIR):
-        return LOCAL_DIR
-    print(f"[warn] {LOCAL_DIR} not found; loading from the hub ({MODEL_ID}).")
-    print("       Run download_model.py first to enable offline use.")
+    if HF_SNAPSHOT.is_dir():
+        return str(HF_SNAPSHOT)
+    print(f"[warn] {HF_SNAPSHOT} not found; loading from the hub ({MODEL_ID}).")
+    print("       Run `python -m it2edge.download_model` first for offline use.")
     return MODEL_ID
 
 

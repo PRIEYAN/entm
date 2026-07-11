@@ -1,0 +1,34 @@
+# systemd Quadlet unit for the IndicTrans2 service on the Pi. Plan §8.
+#
+# The Podman-native auto-start path: no daemon, systemd supervises the container
+# (the "much lower RAM than Docker" path -- no dockerd resident on the Pi).
+#
+# Install (rootless, as the Pi user):
+#   1. Replace <registry> below with your registry/user (matches build_arm64.sh).
+#   2. mkdir -p ~/.config/containers/systemd
+#   3. cp deploy/it2.container ~/.config/containers/systemd/it2.container
+#   4. loginctl enable-linger $USER        # run without an active login session
+#   5. systemctl --user daemon-reload
+#   6. systemctl --user start it2
+#      systemctl --user status it2         # check; journalctl --user -u it2 -f
+
+[Unit]
+Description=IndicTrans2 en-indic translator (CTranslate2 int8)
+
+[Container]
+Image=<registry>/it2-ct2:latest
+PublishPort=8080:8080
+# Match the 2-core Pi; app.py + CT2 read these (plan §9).
+Environment=OMP_NUM_THREADS=2
+Environment=CT2_INTER_THREADS=1
+Environment=CT2_INTRA_THREADS=2
+# Guardrails on 2 GB: cap CPU/memory so the single worker can't OOM the box (§8).
+PodmanArgs=--cpus 2 --memory 1500m
+
+[Service]
+Restart=always
+# Give the model time to load/warm before systemd considers a restart.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
