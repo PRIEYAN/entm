@@ -81,11 +81,50 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     merged.save_pretrained(args.output_dir)
 
-    # Reuse the robust loader, then save the tokenizer alongside the weights so the
-    # merged dir is self-contained. (Reload via tokenizer_utils to dodge the
-    # save_pretrained src_vocab_file reload bug -- plan §5a caveat.)
-    tokenizer = load_indictrans_tokenizer(base_path)
-    tokenizer.save_pretrained(args.output_dir)
+    # Make the merged dir self-contained and loadable, WITHOUT re-serializing
+    # the remote tokenizer. tokenizer.save_pretrained() poisons
+    # tokenizer_config.json: it injects src_vocab_file (the classic reload
+    # TypeError) AND writes added_tokens_decoder as plain dicts, later crashing
+    # with "'dict' object has no attribute 'content'". So we COPY the raw repo
+    # files verbatim instead. This copies:
+    #   * every remote-code .py (modeling_indictrans.py, configuration_*,
+    #     tokenization_*) -- trust_remote_code needs these or the model load
+    #     fails with "does not appear to have a file named modeling_indictrans.py"
+    #   * the tokenizer vocab/config files (dict.*, *.SRC/.TGT, tokenizer_config,
+    #     special_tokens_map)
+    # It never overwrites config.json (save_pretrained already wrote the model's).
+    import shutil
+
+    if os.path.isdir(base_path):
+        skip = {"config.json"}  # keep the merged model's own config
+        copied = []
+        for name in sorted(os.listdir(base_path)):
+            src = os.path.join(base_path, name)
+            if not os.path.isfile(src) or name in skip:
+                continue
+            # weight files belong to the merged model, not the base -- skip them.
+            if name.endswith((".safetensors", ".bin", ".pt", ".h5", ".msgpack")):
+                continue
+            is_py = name.endswith(".py")
+            is_tok = name in {
+                "tokenizer_config.json", "special_tokens_map.json",
+                "dict.SRC.json", "dict.TGT.json", "model.SRC", "model.TGT",
+                "sentencepiece.bpe.model", "tokenizer.json",
+            }
+            if not (is_py or is_tok):
+                continue
+            dst = os.path.join(args.output_dir, name)
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+                copied.append(name)
+        print(f"[info] copied remote-code + tokenizer files from snapshot: {copied}")
+        # Sanity-check that the merged dir's tokenizer now loads.
+        load_indictrans_tokenizer(args.output_dir)
+        print("[info] tokenizer in merged dir loads OK")
+    else:
+        print("[warn] base is a hub id, not a local dir; the merged dir has no "
+              "remote-code/tokenizer files and will not load standalone. Merge "
+              "against a local snapshot (run it2edge.download_model first).")
 
     print(f"\n[ok] merged fp16 model written to: {args.output_dir}  (~400 MB)")
     print("     This is float and full-size on purpose. Next, LAST step:")

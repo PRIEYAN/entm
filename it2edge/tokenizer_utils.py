@@ -57,6 +57,11 @@ def load_indictrans_tokenizer(path):
     kwargs = {k: v for k, v in config.items() if k not in ("auto_map", "tokenizer_class")}
     kwargs.pop("src_vocab_file", None)
     kwargs.pop("tgt_vocab_file", None)
+    # A save_pretrained'd config stores added_tokens_decoder as plain dicts;
+    # transformers' __init__ then does token.content on them and raises
+    # "'dict' object has no attribute 'content'". Drop it -- the special tokens
+    # are already defined by the model's own tokenizer class / vocab files.
+    kwargs.pop("added_tokens_decoder", None)
     if src_vocab:
         kwargs["src_vocab_fp"] = src_vocab
     if tgt_vocab:
