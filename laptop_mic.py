@@ -40,6 +40,18 @@ PI_MODE = os.environ.get("PI_MODE", "speak")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")     # tiny/base/small/medium
 SR = 16000
 
+# --- audio env passed INTO the Pi's SSH session ---
+# A non-interactive SSH session doesn't inherit the Pi's PulseAudio env or read
+# ~/.bashrc, so speak.py would default to the wired jack (aplay) and/or fail to
+# reach PulseAudio. We pass these explicitly so Bluetooth playback works.
+#   PI_AUDIO_OUT=pulse  -> speak.py plays via paplay (PulseAudio -> Bluetooth).
+#                          Set to "alsa" for the wired 3.5mm jack instead.
+#   PI_PULSE_SERVER     -> the Pi's PulseAudio socket (from `pactl info` ->
+#                          "Server String"). Required for pulse over SSH.
+PI_AUDIO_OUT = os.environ.get("PI_AUDIO_OUT", "pulse")
+PI_PULSE_SERVER = os.environ.get("PI_PULSE_SERVER", "")   # e.g. /run/user/0/pulse/native
+PI_PULSE_SINK = os.environ.get("PI_PULSE_SINK", "")        # optional explicit sink name
+
 
 def transcribe(seconds: int) -> str:
     """Record `seconds` of mic audio and transcribe it locally with Whisper."""
@@ -135,7 +147,16 @@ def send_to_pi(english: str) -> int:
     returns the Hindi text, which we print on the laptop next to the English."""
     safe = english.replace('"', '\\"')
     module = "it2edge.serve.speak" if PI_MODE == "speak" else "it2edge.serve.translate_ct2"
-    remote = f'cd {PI_PROJECT} && {PI_VENV_PY} -m {module} --tgt {TGT_LANG} "{safe}"'
+
+    # Prepend audio env so speak.py reaches the right sink over a bare SSH session.
+    env = ""
+    if PI_MODE == "speak":
+        env = f"AUDIO_OUT={PI_AUDIO_OUT} "
+        if PI_AUDIO_OUT == "pulse" and PI_PULSE_SERVER:
+            env += f"PULSE_SERVER={PI_PULSE_SERVER} "
+        if PI_PULSE_SINK:
+            env += f"PULSE_SINK={PI_PULSE_SINK} "
+    remote = f'cd {PI_PROJECT} && {env}{PI_VENV_PY} -m {module} --tgt {TGT_LANG} "{safe}"'
 
     # Capture the Pi's output so we can show a clean transcript on the laptop
     # (the Pi prints a "-> (hin_Deva): ..." line; other lines are noise/logs).
