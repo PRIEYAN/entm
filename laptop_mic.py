@@ -63,22 +63,31 @@ _WHISPER = None
 
 def _add_pip_cuda_libs():
     """Add the pip nvidia-*-cu12 lib dirs to LD_LIBRARY_PATH so ctranslate2 finds
-    libcublas.so.12 / libcudnn. No-op if the packages aren't installed."""
+    libcublas.so.12 / libcudnn. No-op if the packages aren't installed.
+
+    `nvidia` is a namespace package (no __init__.py), so nvidia.__file__ is None.
+    Use its __path__ entries instead to locate cublas/lib and cudnn/lib.
+    """
     try:
         import nvidia
     except ImportError:
         print("[warn] nvidia CUDA pip libs not found. For GPU Whisper install:\n"
               "       pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
         return
-    base = os.path.dirname(nvidia.__file__)
+
     libdirs = []
-    for sub in ("cublas", "cudnn"):
-        d = os.path.join(base, sub, "lib")
-        if os.path.isdir(d):
-            libdirs.append(d)
-    if libdirs:
-        cur = os.environ.get("LD_LIBRARY_PATH", "")
-        os.environ["LD_LIBRARY_PATH"] = ":".join(libdirs + ([cur] if cur else []))
+    for base in list(getattr(nvidia, "__path__", [])):
+        for sub in ("cublas", "cudnn"):
+            d = os.path.join(base, sub, "lib")
+            if os.path.isdir(d):
+                libdirs.append(d)
+    if not libdirs:
+        print("[warn] nvidia namespace found but no cublas/cudnn lib dirs; "
+              "install: pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
+        return
+    cur = os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = ":".join(libdirs + ([cur] if cur else []))
+    print(f"[info] added CUDA libs to LD_LIBRARY_PATH: {libdirs}")
 
 
 def _get_whisper():
