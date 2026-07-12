@@ -1,44 +1,45 @@
 """Convert IndicTrans2 (en-indic distilled 200M) to a CTranslate2 int8 package.
 
-RUN THIS ON YOUR DEV MACHINE (x86-64, e.g. this Windows box), NOT on the Pi.
-It produces a small int8 CTranslate2 model directory that you then copy to a
-64-bit Raspberry Pi and run with it2edge.serve.translate_ct2 -- no PyTorch there.
+RUN THIS ON YOUR DEV MACHINE (x86-64), NOT on the Pi. It produces a small int8
+CTranslate2 model directory you copy to a 64-bit Raspberry Pi and run with
+it2edge.serve.translate_ct2 -- no PyTorch needed there.
 
-Why: a 200M model in fp32 is ~800 MB and needs PyTorch, which is too heavy for
-a 1 GB Pi 3. The int8 CTranslate2 package is ~200 MB and runs on the light
-ctranslate2 CPU runtime, which has aarch64 wheels (64-bit Raspberry Pi OS).
-
-    pip install ctranslate2 transformers sentencepiece protobuf
+    pip install "transformers>=4.51,<4.53" ctranslate2 torch sentencepiece protobuf
     python -m it2edge.convert.convert_ct2    # writes ./model_cache_ct2/
 
 Then copy BOTH of these to the Pi:
-    - model_cache_ct2/                         (the CT2 int8 weights)
+    - model_cache_ct2/                              (the CT2 int8 weights)
     - model_cache/indictrans2-en-indic-dist-200M/   (the tokenizer files)
 
-IMPORTANT compatibility note
-----------------------------
-IndicTrans2 ships a *custom* HF architecture (model_type "IndicTrans"), which
-the stock ct2-transformers-converter does NOT recognise:
+Why a custom loader (the real story)
+------------------------------------
+IndicTrans2 uses a custom HF arch (model_type "IndicTrans") that CT2's stock
+converter does not know:  "No conversion is registered for ... IndicTransConfig".
 
-    ValueError: No conversion is registered for the model configuration
-    IndicTransConfig
+It is NOT plain M2M100: it has SEPARATE source/target vocabularies --
+  encoder.embed_tokens = [32322, 512]  (English source)
+  decoder.embed_tokens = [122672, 512] (Indic target, tied to the output proj)
+Re-presenting it as m2m_100 fails because M2M100 builds ONE shared embedding and
+rejects the 32322-row encoder tensor (size mismatch).
 
-But IndicTrans2 is architecturally M2M100: its weight tensor names are an exact
-match for M2M100/MBart (self_attn.{q,k,v,out}_proj, encoder_attn.*, fc1/fc2,
-self_attn_layer_norm, final_layer_norm, layernorm_embedding, sinusoidal
-positional embeddings created at load with no stored weight). So the default
-here (--force_m2m100, on) STAGES a copy of the model with config.json rewritten
-to present as m2m_100, then converts with CT2's native M2M100 loader (no
---trust_remote_code). No weight tensors are renamed -- only config keys.
+But the layer layout is byte-for-byte BART/M2M100, and CTranslate2's BartLoader
+already reads the encoder and decoder embeddings from their OWN modules (sized
+per-tensor) and supports distinct source/target vocabularies. So the fix is to
+LOAD THE REAL model via trust_remote_code (its own classes build the two
+embeddings correctly and preserve the fine-tune) and hand it to a BartLoader
+subclass registered for IndicTransConfig -- reusing CT2's verified layer wiring,
+overriding only the dual-vocabulary registration.
 
-Pass --no_force_m2m100 to try the plain converter instead (will fail on this
-model, but useful if a future CT2 registers IndicTransConfig natively).
+Verified model facts (from the merged model on disk):
+  config class: IndicTransConfig; encoder_vocab_size=32322, decoder_vocab_size=122672
+  model.model.{encoder,decoder}; model.lm_head; no final_logits_bias
+  encoder children: embed_tokens, embed_positions, layers, layer_norm, layernorm_embedding
+  embed_positions: IndicTransSinusoidalPositionalEmbedding with .weights + .offset
+  tokenizer: get_src_vocab()/get_tgt_vocab(), src_encoder/tgt_encoder dicts
 """
 
 import argparse
-import json
 import os
-import shutil
 import sys
 
 from it2edge.paths import CT2_DIR, HF_SNAPSHOT, MERGED_DIR, MODEL_ID
@@ -47,130 +48,120 @@ LOCAL_HF_DIR = str(HF_SNAPSHOT)
 MERGED_MODEL_DIR = str(MERGED_DIR)
 OUTPUT_DIR = str(CT2_DIR)
 
-FALLBACK_MSG = f"""
-[!] The Hugging Face -> CTranslate2 conversion failed. This usually means the
-    generic converter does not recognise IndicTrans2's custom architecture.
-
-    Official fallback (AI4Bharat ship CT2 ports directly):
-      1. Get the fairseq checkpoint + CT-ported dirs from the IndicTrans2 repo:
-             https://github.com/AI4Bharat/IndicTrans2   (see the models table)
-         The distilled en-indic download already contains 2 CT-ported dirs.
-      2. Or convert a fairseq checkpoint yourself with the fairseq converter:
-             https://opennmt.net/CTranslate2/guides/fairseq.html
-      3. Copy the resulting CT2 dir to the Pi and point it2edge.serve.translate_ct2
-         at it via --model_dir.
+FALLBACK_MSG = """
+[!] CTranslate2 conversion failed. If this is a NEW error (not the old
+    IndicTransConfig one), paste it -- the custom loader below handles the
+    known dual-vocabulary case. Alternative routes, if ever needed:
+      * ONNX: python -m it2edge.convert.export_onnx  (needs a separate serve path)
+      * fairseq -> CT2 (official AI4Bharat path; needs a fairseq checkpoint)
 """
 
 
-def resolve_source(explicit: str | None) -> str:
+def resolve_source(explicit):
     if explicit:
         return explicit
-    # Prefer a fine-tuned + merged model over the stock snapshot (plan §6a).
     if os.path.isdir(MERGED_MODEL_DIR):
         print(f"[info] using merged fine-tuned model at {MERGED_MODEL_DIR}")
         return MERGED_MODEL_DIR
     if os.path.isdir(LOCAL_HF_DIR):
         return LOCAL_HF_DIR
     print(f"[warn] {LOCAL_HF_DIR} not found; converting straight from the hub.")
-    print("       (Run `python -m it2edge.download_model` first to avoid a re-download.)")
     return MODEL_ID
 
 
-def stage_as_m2m100(source: str, stage_dir: str) -> str:
-    """Copy `source` to `stage_dir` and rewrite config.json to present as m2m_100.
+def _register_indictrans_loader():
+    """Register a CT2 loader for IndicTransConfig, subclassing BartLoader.
 
-    IndicTrans2's weights already follow the M2M100 layout; only the config
-    identifies it as a custom arch. We copy everything, then patch config.json:
-      * model_type / architectures -> m2m_100
-      * add the M2M100 attribute names the CT2 loader reads (d_model,
-        max_position_embeddings) aliased from the fairseq-style ones
-      * drop auto_map so the converter does NOT try to import the remote code
-    Returns stage_dir. Does not touch weight files.
+    Returns the RobustTransformersConverter class (with the dtype->torch_dtype
+    shim). Importing/calling this runs @register_loader as a side effect, so the
+    converter will dispatch IndicTransConfig to our loader.
     """
-    if os.path.isdir(stage_dir):
-        shutil.rmtree(stage_dir)
-    if os.path.isdir(source):
-        shutil.copytree(source, stage_dir)
-    else:
-        raise SystemExit(
-            f"--force_m2m100 needs a local model dir, got '{source}'. Download it "
-            "first with `python -m it2edge.download_model`, or pass --model <dir>."
-        )
+    from ctranslate2.converters import transformers as ct2t
+    from ctranslate2.converters.transformers import (
+        BartLoader,
+        TransformersConverter,
+        register_loader,
+    )
 
-    cfg_path = os.path.join(stage_dir, "config.json")
-    with open(cfg_path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
+    @register_loader("IndicTransConfig")
+    class IndicTransLoader(BartLoader):
+        @property
+        def architecture_name(self):
+            return "IndicTransForConditionalGeneration"
 
-    d_model = cfg.get("encoder_embed_dim") or cfg.get("d_model")
-    max_pos = max(
-        cfg.get("max_source_positions", 0),
-        cfg.get("max_target_positions", 0),
-    ) or cfg.get("max_position_embeddings", 1024)
+        def get_model_spec(self, model):
+            # Same spec shape as M2M100/BART: pre-norm, GELU, layernorm_embedding.
+            spec = ct2t.transformer_spec.TransformerSpec.from_config(
+                (model.config.encoder_layers, model.config.decoder_layers),
+                model.config.encoder_attention_heads,
+                pre_norm=True,
+                activation=ct2t.common_spec.Activation.GELU,
+                layernorm_embedding=True,
+            )
+            # BartLoader's verified wiring reads enc/dec embeddings from their own
+            # (differently sized) modules -- exactly what dual-vocab needs.
+            self.set_encoder(spec.encoder, model.model.encoder)
+            self.set_decoder(spec.decoder, model.model.decoder)
+            self.set_linear(spec.decoder.projection, model.lm_head)
+            return spec
 
-    # --- present as vanilla M2M100 so CT2's native loader picks it up ---
-    cfg["model_type"] = "m2m_100"
-    cfg["architectures"] = ["M2M100ForConditionalGeneration"]
-    cfg["d_model"] = d_model
-    cfg["max_position_embeddings"] = max_pos
-    # These are the names the M2M100 loader / config expects; alias them across
-    # in case they are only present under the fairseq-style spelling.
-    cfg.setdefault("encoder_ffn_dim", cfg.get("encoder_ffn_dim"))
-    cfg.setdefault("decoder_ffn_dim", cfg.get("decoder_ffn_dim"))
-    cfg["scale_embedding"] = cfg.get("scale_embedding", True)
-    cfg["activation_function"] = cfg.get("activation_function", "gelu")
-    # Do NOT let the converter import the custom remote classes.
-    cfg.pop("auto_map", None)
-    cfg.pop("tokenizer_class", None)
+        def get_vocabulary(self, model, tokenizer):
+            # Return the two vocabularies as (source, target) ordered token lists.
+            # Order MUST match embedding rows == HF token ids, so we invert the
+            # tokenizer's src/tgt encoder dicts (token -> id) by id.
+            def ordered(token_to_id, n):
+                toks = [None] * n
+                for tok, idx in token_to_id.items():
+                    if 0 <= idx < n:
+                        toks[idx] = tok
+                # Fill any gaps so the count matches the embedding rows exactly.
+                for i in range(n):
+                    if toks[i] is None:
+                        toks[i] = f"<madeupword{i}>"
+                return toks
 
-    with open(cfg_path, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+            # get_src_vocab()/get_tgt_vocab() return {token: id} (HF convention);
+            # fall back to the internal encoder dicts if a build lacks them.
+            src_map = (tokenizer.get_src_vocab() if hasattr(tokenizer, "get_src_vocab")
+                       else tokenizer.src_encoder)
+            tgt_map = (tokenizer.get_tgt_vocab() if hasattr(tokenizer, "get_tgt_vocab")
+                       else tokenizer.tgt_encoder)
+            src = ordered(src_map, model.config.encoder_vocab_size)
+            tgt = ordered(tgt_map, model.config.decoder_vocab_size)
+            return src, tgt
 
-    print(f"[info] staged M2M100-shaped copy at {stage_dir} "
-          f"(d_model={d_model}, max_position_embeddings={max_pos})")
-    return stage_dir
+        def set_vocabulary(self, spec, tokens):
+            src, tgt = tokens
+            spec.register_source_vocabulary(src)
+            spec.register_target_vocabulary(tgt)
 
-
-def _build_converter(source, trust_remote_code):
-    """CT2 TransformersConverter that bridges new-ct2 vs transformers<4.53.
-
-    Newer ctranslate2 (>=~4.7) calls model_class.from_pretrained(dtype=...), but
-    transformers<4.53 only knows torch_dtype=; the stray `dtype` then leaks into
-    M2M100ForConditionalGeneration.__init__ and raises
-        TypeError: __init__() got an unexpected keyword argument 'dtype'
-    load_model is ct2's signature-stable override point. Remapping
-    dtype->torch_dtype preserves the load dtype (so int8 quant stays faithful)
-    and is a harmless no-op on older ct2 that already passes torch_dtype.
-    """
-    from ctranslate2.converters.transformers import TransformersConverter
+        def set_config(self, config, model, tokenizer):
+            config.bos_token = tokenizer.bos_token
+            config.eos_token = tokenizer.eos_token
+            config.unk_token = tokenizer.unk_token
+            config.decoder_start_token = tokenizer.convert_ids_to_tokens(
+                model.config.decoder_start_token_id
+            )
 
     class RobustTransformersConverter(TransformersConverter):
+        """Bridge new-ctranslate2 (passes dtype=) vs transformers<4.53
+        (torch_dtype=). Harmless no-op on older ct2."""
+
         def load_model(self, model_class, model_name_or_path, **kwargs):
             if "dtype" in kwargs:
                 kwargs.setdefault("torch_dtype", kwargs.pop("dtype"))
             return model_class.from_pretrained(model_name_or_path, **kwargs)
 
-    return RobustTransformersConverter(source, trust_remote_code=trust_remote_code)
+    return RobustTransformersConverter
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(
         description="Convert IndicTrans2 (HF) to a CTranslate2 int8 package"
     )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="model path/id to convert (default: merged, else stock snapshot, else hub)",
-    )
-    parser.add_argument("--output_dir", default=OUTPUT_DIR, help="CT2 output directory")
-    # On ARM int8 resolves to int8_float32 (Ruy); int8_float16/int16 just fall
-    # back with no benefit -- so int8 is the right default (plan §6a).
+    parser.add_argument("--model", default=None, help="model path/id (default: merged)")
+    parser.add_argument("--output_dir", default=OUTPUT_DIR)
     parser.add_argument("--quantization", default="int8")
-    parser.add_argument(
-        "--no_force_m2m100",
-        dest="force_m2m100",
-        action="store_false",
-        help="do NOT re-present the model as m2m_100 (will fail on IndicTrans2)",
-    )
     args = parser.parse_args()
 
     if os.path.isdir(args.output_dir):
@@ -180,44 +171,28 @@ def main() -> None:
 
     source = resolve_source(args.model)
 
-    # Default path: stage an M2M100-shaped copy so CT2's native loader accepts
-    # it (IndicTrans2's weights are already M2M100-layout; only config differs).
-    if args.force_m2m100:
-        stage_dir = args.output_dir + "_m2m100_src"
-        source = stage_as_m2m100(source, stage_dir)
-
-    # In-process conversion (equivalent to the ct2-transformers-converter CLI,
-    # which is just TransformersConverter(...).convert(..., quantization=...)).
-    # We use a subclass so the dtype->torch_dtype remap works with
-    # transformers<4.53 regardless of the installed ctranslate2 version. For the
-    # staged M2M100 copy we must NOT trust remote code -- we want CT2's native
-    # M2M100 loader; only the (failing) custom-arch path would need it True.
-    trust_remote_code = not args.force_m2m100
-    print(f"[info] converting {source} -> {args.output_dir} "
-          f"(quantization={args.quantization}, trust_remote_code={trust_remote_code})")
-
     try:
-        converter = _build_converter(source, trust_remote_code)
-        converter.convert(args.output_dir, quantization=args.quantization, force=True)
+        converter_cls = _register_indictrans_loader()
     except ImportError:
-        raise SystemExit(
-            "ctranslate2 is not installed. Install it with:\n"
-            "    pip install ctranslate2"
-        )
-    except Exception as exc:  # conversion failed for any reason
+        raise SystemExit("ctranslate2 is not installed:  pip install ctranslate2")
+
+    print(f"[info] converting {source} -> {args.output_dir} "
+          f"(quantization={args.quantization}, custom IndicTrans dual-vocab loader)")
+    try:
+        # trust_remote_code=True so from_pretrained builds the REAL IndicTrans
+        # model (two separate embeddings); our registered loader handles it.
+        converter = converter_cls(source, trust_remote_code=True)
+        converter.convert(args.output_dir, quantization=args.quantization, force=True)
+    except Exception as exc:
         print(f"[error] conversion failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         print(FALLBACK_MSG, file=sys.stderr)
         raise SystemExit(1)
 
-    # Remove the staged M2M100 copy; the CT2 output is self-contained.
-    if args.force_m2m100:
-        shutil.rmtree(source, ignore_errors=True)
-
     print(f"\n[ok] int8 CTranslate2 model written to: {args.output_dir}")
-    print("     Copy it (and the tokenizer dir) to the Pi, then run "
-          "`python -m it2edge.serve.translate_ct2`.")
-    print("[!]  int8 + the M2M100 re-presentation are both lossy re: the source "
-          "model -- A/B a few sentences against the torch path before shipping.")
+    print("     Next: verify it loads, then A/B against the torch path:")
+    print("       python -m it2edge.serve.translate_ct2 \"Jump\"")
+    print("       python -m it2edge.serve.translate     --model merged \"Jump\"")
+    print("[!]  int8 is lossy -- compare a few sentences before shipping to the Pi.")
 
 
 if __name__ == "__main__":
