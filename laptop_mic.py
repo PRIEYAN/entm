@@ -61,6 +61,26 @@ def transcribe(seconds: int) -> str:
 _WHISPER = None
 
 
+def _add_pip_cuda_libs():
+    """Add the pip nvidia-*-cu12 lib dirs to LD_LIBRARY_PATH so ctranslate2 finds
+    libcublas.so.12 / libcudnn. No-op if the packages aren't installed."""
+    try:
+        import nvidia
+    except ImportError:
+        print("[warn] nvidia CUDA pip libs not found. For GPU Whisper install:\n"
+              "       pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
+        return
+    base = os.path.dirname(nvidia.__file__)
+    libdirs = []
+    for sub in ("cublas", "cudnn"):
+        d = os.path.join(base, sub, "lib")
+        if os.path.isdir(d):
+            libdirs.append(d)
+    if libdirs:
+        cur = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = ":".join(libdirs + ([cur] if cur else []))
+
+
 def _get_whisper():
     """Load Whisper once. Honors WHISPER_DEVICE (cpu/cuda). Default cpu -- it
     always works; cuda needs CUDA libs (libcublas etc.) installed on the laptop.
@@ -70,9 +90,12 @@ def _get_whisper():
     if _WHISPER is not None:
         return _WHISPER
 
+    want = os.environ.get("WHISPER_DEVICE", "cpu").lower()
+    if want == "cuda":
+        _add_pip_cuda_libs()  # so ctranslate2 finds libcublas/libcudnn from pip
+
     from faster_whisper import WhisperModel
 
-    want = os.environ.get("WHISPER_DEVICE", "cpu").lower()
     if want == "cuda":
         try:
             import numpy as np
