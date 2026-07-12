@@ -13,6 +13,16 @@ Usage (run from the project root):
     # no args -> runs a small built-in demo across a few languages
     python -m it2edge.serve.translate
 
+Which model runs (fine-tuned vs stock):
+    By default this loads the fine-tuned model_cache_merged/ if it exists,
+    otherwise the stock snapshot. Force either one explicitly:
+    # your fine-tuned model
+    python -m it2edge.serve.translate --model merged "Help!"
+    # the ORIGINAL stock model (ignore your fine-tune)
+    python -m it2edge.serve.translate --model stock "Help!"
+    # any model directory
+    python -m it2edge.serve.translate --model /path/to/model "Help!"
+
 Common target codes: hin_Deva (Hindi), tam_Taml (Tamil), tel_Telu (Telugu),
 ben_Beng (Bengali), mar_Deva (Marathi), guj_Gujr (Gujarati), kan_Knda (Kannada),
 mal_Mlym (Malayalam), pan_Guru (Punjabi), urd_Arab (Urdu).
@@ -24,7 +34,7 @@ import argparse
 import torch
 from transformers import AutoModelForSeq2SeqLM
 
-from it2edge.paths import HF_SNAPSHOT, MODEL_ID
+from it2edge.paths import HF_SNAPSHOT, MERGED_DIR, MODEL_ID
 from it2edge.tokenizer_utils import load_indictrans_tokenizer
 
 try:
@@ -38,18 +48,44 @@ except ImportError as exc:  # pragma: no cover - guidance for a missing dep
 SRC_LANG = "eng_Latn"
 
 
-def resolve_model_path() -> str:
-    """Prefer the offline copy; fall back to the hub id (needs internet)."""
-    if HF_SNAPSHOT.is_dir():
-        return str(HF_SNAPSHOT)
-    print(f"[warn] {HF_SNAPSHOT} not found; loading from the hub ({MODEL_ID}).")
-    print("       Run `python -m it2edge.download_model` first for offline use.")
-    return MODEL_ID
+def resolve_model_path(which: str = "auto") -> str:
+    """Pick which model to load.
+
+    which:
+      "auto"   -> fine-tuned model_cache_merged/ if present, else stock snapshot
+      "merged" -> the fine-tuned merged model (error if it isn't there)
+      "stock"  -> the original downloaded snapshot (ignore any fine-tune)
+      <path>   -> that exact directory / hub id
+    """
+    if which == "stock":
+        if HF_SNAPSHOT.is_dir():
+            return str(HF_SNAPSHOT)
+        print(f"[warn] {HF_SNAPSHOT} not found; loading stock from the hub ({MODEL_ID}).")
+        return MODEL_ID
+    if which == "merged":
+        if MERGED_DIR.is_dir():
+            return str(MERGED_DIR)
+        raise SystemExit(
+            f"--model merged requested but {MERGED_DIR} does not exist. Run:\n"
+            "    python -m it2edge.train.merge_lora --adapter_dir lora_adapters"
+        )
+    if which == "auto":
+        if MERGED_DIR.is_dir():
+            print(f"[info] using fine-tuned model at {MERGED_DIR}")
+            return str(MERGED_DIR)
+        if HF_SNAPSHOT.is_dir():
+            print(f"[info] no merged model; using stock snapshot at {HF_SNAPSHOT}")
+            return str(HF_SNAPSHOT)
+        print(f"[warn] no local model; loading stock from the hub ({MODEL_ID}).")
+        return MODEL_ID
+    # Anything else: treat as an explicit path or hub id.
+    return which
 
 
-def load():
+def load(which: str = "auto"):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    path = resolve_model_path()
+    path = resolve_model_path(which)
+    print(f"[info] model path: {path}")
 
     tokenizer = load_indictrans_tokenizer(path)
     model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -115,9 +151,15 @@ def main() -> None:
     parser.add_argument(
         "--tgt", default="hin_Deva", help="target language code (default: hin_Deva)"
     )
+    parser.add_argument(
+        "--model",
+        default="auto",
+        help="which model: 'auto' (merged if present, else stock), "
+        "'merged' (your fine-tune), 'stock' (original), or a path",
+    )
     args = parser.parse_args()
 
-    tokenizer, model, processor, device = load()
+    tokenizer, model, processor, device = load(args.model)
     print(f"[info] loaded on device: {device}")
 
     if not args.text:
