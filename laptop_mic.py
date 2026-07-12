@@ -29,7 +29,9 @@ import tempfile
 
 # --- configure these for your setup (env overrides win) ---
 PI_HOST = os.environ.get("PI_HOST", "root@192.168.1.50")   # <PI_USER>@<PI_IP>
-PI_PROJECT = os.environ.get("PI_PROJECT", "~/entm")         # repo path on the Pi
+# Use an ABSOLUTE path -- "~" expands on the LAPTOP, not the Pi, over SSH.
+# DietPi runs as root, so the repo is typically /root/entm.
+PI_PROJECT = os.environ.get("PI_PROJECT", "/root/entm")     # repo path on the Pi
 PI_VENV_PY = os.environ.get("PI_VENV_PY", "venv/bin/python")  # python on the Pi
 TGT_LANG = os.environ.get("TGT_LANG", "hin_Deva")
 # "speak" -> Pi translates AND speaks aloud (full pipeline).
