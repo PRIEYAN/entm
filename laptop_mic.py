@@ -43,14 +43,8 @@ def transcribe(seconds: int) -> str:
     """Record `seconds` of mic audio and transcribe it locally with Whisper."""
     import sounddevice as sd
     import soundfile as sf
-    from faster_whisper import WhisperModel
 
-    # device="cuda" -> laptop GPU. Falls back to CPU if CUDA isn't available.
-    try:
-        model = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
-    except Exception:
-        print("[warn] CUDA Whisper unavailable; using CPU (slower).")
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    model = _get_whisper()
 
     print(f"[recording {seconds}s -- speak English now]")
     audio = sd.rec(int(seconds * SR), samplerate=SR, channels=1)
@@ -62,6 +56,39 @@ def transcribe(seconds: int) -> str:
     text = " ".join(s.text for s in segments).strip()
     os.unlink(wav)
     return text
+
+
+_WHISPER = None
+
+
+def _get_whisper():
+    """Load Whisper once. Honors WHISPER_DEVICE (cpu/cuda). Default cpu -- it
+    always works; cuda needs CUDA libs (libcublas etc.) installed on the laptop.
+    Verifies the device with a tiny encode so a broken CUDA falls back to CPU
+    (the cuda error otherwise only surfaces mid-transcribe)."""
+    global _WHISPER
+    if _WHISPER is not None:
+        return _WHISPER
+
+    from faster_whisper import WhisperModel
+
+    want = os.environ.get("WHISPER_DEVICE", "cpu").lower()
+    if want == "cuda":
+        try:
+            import numpy as np
+            m = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+            # Force actual CUDA use now; if libcublas is missing this raises here.
+            m.encode(np.zeros((80, 3000), dtype=np.float32), to_cpu=False)
+            print("[info] Whisper on CUDA (GPU)")
+            _WHISPER = m
+            return _WHISPER
+        except Exception as exc:
+            print(f"[warn] CUDA Whisper unavailable ({type(exc).__name__}); "
+                  "using CPU. (Set WHISPER_DEVICE=cpu to silence.)")
+
+    _WHISPER = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    print("[info] Whisper on CPU")
+    return _WHISPER
 
 
 def send_to_pi(english: str) -> int:
