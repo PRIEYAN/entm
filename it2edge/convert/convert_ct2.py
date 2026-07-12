@@ -39,7 +39,6 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 
 from it2edge.paths import CT2_DIR, HF_SNAPSHOT, MERGED_DIR, MODEL_ID
@@ -131,6 +130,28 @@ def stage_as_m2m100(source: str, stage_dir: str) -> str:
     return stage_dir
 
 
+def _build_converter(source, trust_remote_code):
+    """CT2 TransformersConverter that bridges new-ct2 vs transformers<4.53.
+
+    Newer ctranslate2 (>=~4.7) calls model_class.from_pretrained(dtype=...), but
+    transformers<4.53 only knows torch_dtype=; the stray `dtype` then leaks into
+    M2M100ForConditionalGeneration.__init__ and raises
+        TypeError: __init__() got an unexpected keyword argument 'dtype'
+    load_model is ct2's signature-stable override point. Remapping
+    dtype->torch_dtype preserves the load dtype (so int8 quant stays faithful)
+    and is a harmless no-op on older ct2 that already passes torch_dtype.
+    """
+    from ctranslate2.converters.transformers import TransformersConverter
+
+    class RobustTransformersConverter(TransformersConverter):
+        def load_model(self, model_class, model_name_or_path, **kwargs):
+            if "dtype" in kwargs:
+                kwargs.setdefault("torch_dtype", kwargs.pop("dtype"))
+            return model_class.from_pretrained(model_name_or_path, **kwargs)
+
+    return RobustTransformersConverter(source, trust_remote_code=trust_remote_code)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert IndicTrans2 (HF) to a CTranslate2 int8 package"
@@ -165,26 +186,26 @@ def main() -> None:
         stage_dir = args.output_dir + "_m2m100_src"
         source = stage_as_m2m100(source, stage_dir)
 
-    cmd = [
-        "ct2-transformers-converter",
-        "--model", source,
-        "--output_dir", args.output_dir,
-        "--quantization", args.quantization,
-    ]
-    if not args.force_m2m100:
-        # Only needed for the (failing) custom-arch path; the staged M2M100 copy
-        # must NOT trust remote code -- we want CT2's native M2M100 loader.
-        cmd.append("--trust_remote_code")
-    print("[info] running:", " ".join(cmd))
+    # In-process conversion (equivalent to the ct2-transformers-converter CLI,
+    # which is just TransformersConverter(...).convert(..., quantization=...)).
+    # We use a subclass so the dtype->torch_dtype remap works with
+    # transformers<4.53 regardless of the installed ctranslate2 version. For the
+    # staged M2M100 copy we must NOT trust remote code -- we want CT2's native
+    # M2M100 loader; only the (failing) custom-arch path would need it True.
+    trust_remote_code = not args.force_m2m100
+    print(f"[info] converting {source} -> {args.output_dir} "
+          f"(quantization={args.quantization}, trust_remote_code={trust_remote_code})")
 
     try:
-        subprocess.run(cmd, check=True)
-    except FileNotFoundError:
+        converter = _build_converter(source, trust_remote_code)
+        converter.convert(args.output_dir, quantization=args.quantization, force=True)
+    except ImportError:
         raise SystemExit(
-            "ct2-transformers-converter not found. Install it with:\n"
-            "    pip install ctranslate2 transformers"
+            "ctranslate2 is not installed. Install it with:\n"
+            "    pip install ctranslate2"
         )
-    except subprocess.CalledProcessError:
+    except Exception as exc:  # conversion failed for any reason
+        print(f"[error] conversion failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         print(FALLBACK_MSG, file=sys.stderr)
         raise SystemExit(1)
 
