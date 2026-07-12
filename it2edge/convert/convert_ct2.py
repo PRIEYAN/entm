@@ -87,7 +87,12 @@ def _register_indictrans_loader():
     class IndicTransLoader(BartLoader):
         @property
         def architecture_name(self):
-            return "IndicTransForConditionalGeneration"
+            # CT2's _load does getattr(transformers, architecture_name) BEFORE
+            # calling load_model. IndicTransForConditionalGeneration is NOT in
+            # the transformers namespace (it lives in remote code), so name a
+            # class that IS present as a decoy; load_model below ignores it and
+            # loads the real model via AutoModelForSeq2SeqLM + trust_remote_code.
+            return "M2M100ForConditionalGeneration"
 
         def get_model_spec(self, model):
             # Same spec shape as M2M100/BART: pre-norm, GELU, layernorm_embedding.
@@ -144,13 +149,18 @@ def _register_indictrans_loader():
             )
 
     class RobustTransformersConverter(TransformersConverter):
-        """Bridge new-ctranslate2 (passes dtype=) vs transformers<4.53
-        (torch_dtype=). Harmless no-op on older ct2."""
+        """Load the REAL IndicTrans model (not the M2M100 decoy) and bridge the
+        dtype/torch_dtype kwarg mismatch (new ct2 vs transformers<4.53)."""
 
         def load_model(self, model_class, model_name_or_path, **kwargs):
+            from transformers import AutoModelForSeq2SeqLM
+
             if "dtype" in kwargs:
                 kwargs.setdefault("torch_dtype", kwargs.pop("dtype"))
-            return model_class.from_pretrained(model_name_or_path, **kwargs)
+            # Ignore model_class (the M2M100 decoy from architecture_name) and
+            # build the actual IndicTrans model via its remote code.
+            kwargs.setdefault("trust_remote_code", True)
+            return AutoModelForSeq2SeqLM.from_pretrained(model_name_or_path, **kwargs)
 
     return RobustTransformersConverter
 
