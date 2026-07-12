@@ -109,14 +109,19 @@ def _get_whisper():
         try:
             import numpy as np
             m = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
-            # Force actual CUDA use now; if libcublas is missing this raises here.
-            m.encode(np.zeros((80, 3000), dtype=np.float32), to_cpu=False)
+            # Force actual CUDA use now (1s of silence) so a broken CUDA/libcublas
+            # surfaces HERE instead of mid-transcribe. A real transcribe exercises
+            # the full GPU path more faithfully than a hand-built encode.
+            m.transcribe(np.zeros(16000, dtype=np.float32), language="en")
             print("[info] Whisper on CUDA (GPU)")
             _WHISPER = m
             return _WHISPER
         except Exception as exc:
-            print(f"[warn] CUDA Whisper unavailable ({type(exc).__name__}); "
-                  "using CPU. (Set WHISPER_DEVICE=cpu to silence.)")
+            import traceback
+            print(f"[warn] CUDA Whisper unavailable -- falling back to CPU.")
+            print(f"       reason: {type(exc).__name__}: {exc}")
+            print("       (full trace below; set WHISPER_DEVICE=cpu to skip GPU)")
+            traceback.print_exc()
 
     _WHISPER = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     print("[info] Whisper on CPU")
