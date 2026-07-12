@@ -110,6 +110,12 @@ def _register_indictrans_loader():
             self.set_linear(spec.decoder.projection, model.lm_head)
             return spec
 
+        def set_position_encodings(self, spec, module):
+            # IndicTransSinusoidalPositionalEmbedding stores its table as
+            # `.weights` (plural) with an `.offset`, exactly like M2M100 -- not
+            # `.weight` as BartLoader's base method assumes. Read it the M2M100 way.
+            spec.encodings = module.weights[module.offset:]
+
         def get_vocabulary(self, model, tokenizer):
             # Return the two vocabularies as (source, target) ordered token lists.
             # Order MUST match embedding rows == HF token ids, so we invert the
