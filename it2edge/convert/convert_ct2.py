@@ -124,21 +124,22 @@ def _register_indictrans_loader():
                 toks = [None] * n
                 for tok, idx in token_to_id.items():
                     if 0 <= idx < n:
-                        toks[idx] = tok
+                        toks[idx] = str(tok)  # CT2 vocab entries must be strings
                 # Fill any gaps so the count matches the embedding rows exactly.
                 for i in range(n):
                     if toks[i] is None:
                         toks[i] = f"<madeupword{i}>"
                 return toks
 
-            # get_src_vocab()/get_tgt_vocab() return {token: id} (HF convention);
-            # fall back to the internal encoder dicts if a build lacks them.
-            src_map = (tokenizer.get_src_vocab() if hasattr(tokenizer, "get_src_vocab")
-                       else tokenizer.src_encoder)
-            tgt_map = (tokenizer.get_tgt_vocab() if hasattr(tokenizer, "get_tgt_vocab")
-                       else tokenizer.tgt_encoder)
-            src = ordered(src_map, model.config.encoder_vocab_size)
-            tgt = ordered(tgt_map, model.config.decoder_vocab_size)
+            # Use the raw {token: id} encoder dicts directly. Do NOT call
+            # get_src_vocab()/get_tgt_vocab(): those do
+            # dict(self.tgt_encoder, **self.added_tokens_decoder), and
+            # added_tokens_decoder is keyed by INT ids, so the ** splat raises
+            # "TypeError: keywords must be strings". CT2 only needs the base
+            # encoder vocab in id order to size the source/target embeddings; any
+            # added special tokens are already rows in tgt_encoder/src_encoder.
+            src = ordered(tokenizer.src_encoder, model.config.encoder_vocab_size)
+            tgt = ordered(tokenizer.tgt_encoder, model.config.decoder_vocab_size)
             return src, tgt
 
         def set_vocabulary(self, spec, tokens):
