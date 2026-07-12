@@ -58,30 +58,42 @@ def speak(text: str):
             f"Piper voice not found at {PIPER_VOICE}. Download a Hindi voice "
             "(.onnx + .onnx.json) or set PIPER_VOICE."
         )
-    if shutil.which("aplay") is None:
-        raise SystemExit(
-            "aplay not found. Install ALSA utils on the Pi:  sudo apt install -y alsa-utils"
-        )
 
     sr = _voice_sample_rate()
-    # ALSA device. "Host is down" / silence usually means the DEFAULT device is
-    # wrong; point ALSA_DEVICE at the real card (e.g. hw:0,0 for the Pi 3 B+
-    # headphone jack, which aplay -l shows as card 0). Empty = aplay's default.
-    aplay_cmd = ["aplay", "-q", "-r", sr, "-f", "S16_LE", "-t", "raw"]
-    device = os.environ.get("ALSA_DEVICE", "hw:0,0")
-    if device:
-        aplay_cmd += ["-D", device]
-    aplay_cmd.append("-")
+
+    # Two output backends:
+    #   AUDIO_OUT=alsa  (default) -> aplay straight to an ALSA device (wired jack,
+    #                    hw:0,0). Bypasses PulseAudio -- does NOT reach Bluetooth.
+    #   AUDIO_OUT=pulse          -> paplay via PulseAudio. Use this for a
+    #                    BLUETOOTH speaker (set it default with
+    #                    `pactl set-default-sink <bluez_sink>` first).
+    backend = os.environ.get("AUDIO_OUT", "alsa").lower()
+    if backend == "pulse":
+        play_cmd = ["paplay", "--raw", f"--rate={sr}", "--format=s16le",
+                    "--channels=1"]
+        sink = os.environ.get("PULSE_SINK", "")
+        if sink:
+            play_cmd += [f"--device={sink}"]
+        if shutil.which("paplay") is None:
+            raise SystemExit("paplay not found. Install:  sudo apt install -y pulseaudio-utils")
+    else:
+        play_cmd = ["aplay", "-q", "-r", sr, "-f", "S16_LE", "-t", "raw"]
+        device = os.environ.get("ALSA_DEVICE", "hw:0,0")
+        if device:
+            play_cmd += ["-D", device]
+        play_cmd.append("-")
+        if shutil.which("aplay") is None:
+            raise SystemExit("aplay not found. Install:  sudo apt install -y alsa-utils")
 
     piper = subprocess.Popen(
         [PIPER_BIN, "--model", PIPER_VOICE, "--output-raw"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
     )
-    aplay = subprocess.Popen(aplay_cmd, stdin=piper.stdout)
-    piper.stdout.close()  # let aplay own the pipe end
+    player = subprocess.Popen(play_cmd, stdin=piper.stdout)
+    piper.stdout.close()  # let the player own the pipe end
     piper.stdin.write(text.encode("utf-8"))
     piper.stdin.close()
-    aplay.wait()
+    player.wait()
     piper.wait()
 
 
