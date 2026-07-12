@@ -32,6 +32,9 @@ PI_HOST = os.environ.get("PI_HOST", "root@192.168.1.50")   # <PI_USER>@<PI_IP>
 PI_PROJECT = os.environ.get("PI_PROJECT", "~/entm")         # repo path on the Pi
 PI_VENV_PY = os.environ.get("PI_VENV_PY", "venv/bin/python")  # python on the Pi
 TGT_LANG = os.environ.get("TGT_LANG", "hin_Deva")
+# "speak" -> Pi translates AND speaks aloud (full pipeline).
+# "translate" -> Pi only prints the Hindi text (step-1 behavior, no audio).
+PI_MODE = os.environ.get("PI_MODE", "speak")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")     # tiny/base/small/medium
 SR = 16000
 
@@ -62,13 +65,11 @@ def transcribe(seconds: int) -> str:
 
 
 def send_to_pi(text: str) -> int:
-    """SSH the English text to the Pi's translate CLI; the Pi prints the Hindi."""
+    """SSH the English text to the Pi. Pi translates (and speaks, if PI_MODE=speak)."""
     safe = text.replace('"', '\\"')
-    remote = (
-        f'cd {PI_PROJECT} && {PI_VENV_PY} -m it2edge.serve.translate_ct2 '
-        f'--tgt {TGT_LANG} "{safe}"'
-    )
-    print(f"[sending to {PI_HOST}] {text}")
+    module = "it2edge.serve.speak" if PI_MODE == "speak" else "it2edge.serve.translate_ct2"
+    remote = f'cd {PI_PROJECT} && {PI_VENV_PY} -m {module} --tgt {TGT_LANG} "{safe}"'
+    print(f"[sending to {PI_HOST} | mode={PI_MODE}] {text}")
     # Stream the Pi's stdout straight to our terminal so we see the Hindi.
     return subprocess.run(["ssh", PI_HOST, remote]).returncode
 
