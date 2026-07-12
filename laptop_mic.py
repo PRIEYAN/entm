@@ -1,8 +1,12 @@
 """STEP 1 of the voice pipeline: laptop mic -> local Whisper STT -> Pi translate.
 
 Runs on the GPU LAPTOP. Records your English speech, transcribes it LOCALLY with
-Whisper (on the laptop GPU -- no cloud), then sends the text over SSH to the Pi,
-which runs the existing translate CLI and prints the Hindi translation.
+Whisper (on the laptop GPU by default -- no cloud), then sends the text over SSH
+to the Pi, which runs the existing translate CLI and prints the Hindi translation.
+
+STT runs on the GPU (CUDA, float16) by default for speed; it auto-falls back to
+CPU if CUDA libs are missing. Force CPU with WHISPER_DEVICE=cpu. GPU needs:
+    pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 This step does NOT do TTS yet -- it just proves: voice -> English text ->
 (SSH) -> Hindi text printed back. Speaker/TTS is a later step.
@@ -105,15 +109,16 @@ def _add_pip_cuda_libs():
 
 
 def _get_whisper():
-    """Load Whisper once. Honors WHISPER_DEVICE (cpu/cuda). Default cpu -- it
-    always works; cuda needs CUDA libs (libcublas etc.) installed on the laptop.
+    """Load Whisper once. Honors WHISPER_DEVICE (cpu/cuda). Default cuda -- use
+    the GPU fully for fast transcription; auto-falls back to CPU if CUDA libs
+    (libcublas etc.) are missing/broken. Set WHISPER_DEVICE=cpu to force CPU.
     Verifies the device with a tiny encode so a broken CUDA falls back to CPU
     (the cuda error otherwise only surfaces mid-transcribe)."""
     global _WHISPER
     if _WHISPER is not None:
         return _WHISPER
 
-    want = os.environ.get("WHISPER_DEVICE", "cpu").lower()
+    want = os.environ.get("WHISPER_DEVICE", "cuda").lower()
     if want == "cuda":
         _add_pip_cuda_libs()  # so ctranslate2 finds libcublas/libcudnn from pip
 
