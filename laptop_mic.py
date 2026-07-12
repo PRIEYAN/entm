@@ -64,18 +64,40 @@ def transcribe(seconds: int) -> str:
     return text
 
 
-def send_to_pi(text: str) -> int:
-    """SSH the English text to the Pi. Pi translates (and speaks, if PI_MODE=speak)."""
-    safe = text.replace('"', '\\"')
+def send_to_pi(english: str) -> int:
+    """SSH the English text to the Pi. The Pi translates + speaks it aloud, and
+    returns the Hindi text, which we print on the laptop next to the English."""
+    safe = english.replace('"', '\\"')
     module = "it2edge.serve.speak" if PI_MODE == "speak" else "it2edge.serve.translate_ct2"
     remote = f'cd {PI_PROJECT} && {PI_VENV_PY} -m {module} --tgt {TGT_LANG} "{safe}"'
-    print(f"[sending to {PI_HOST} | mode={PI_MODE}] {text}")
-    # Stream the Pi's stdout straight to our terminal so we see the Hindi.
-    return subprocess.run(["ssh", PI_HOST, remote]).returncode
+
+    # Capture the Pi's output so we can show a clean transcript on the laptop
+    # (the Pi prints a "-> (hin_Deva): ..." line; other lines are noise/logs).
+    proc = subprocess.run(["ssh", PI_HOST, remote], capture_output=True, text=True)
+
+    hindi = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("-> (") and "):" in line:
+            hindi = line.split("):", 1)[1].strip()
+
+    print("-" * 48)
+    print(f"  🎤 English : {english}")
+    print(f"  🔊 {TGT_LANG} : {hindi if hindi else '[see Pi output below]'}")
+    print("-" * 48)
+    if not hindi and proc.stdout.strip():
+        # Fallback: show raw Pi output if we couldn't parse the Hindi line.
+        print(proc.stdout.strip())
+    if proc.returncode != 0 and proc.stderr.strip():
+        # Real errors (not the harmless "None of PyTorch..." note) go to stderr.
+        errs = [l for l in proc.stderr.splitlines()
+                if "None of PyTorch" not in l and l.strip()]
+        if errs:
+            print("[pi stderr]\n" + "\n".join(errs), file=sys.stderr)
+    return proc.returncode
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Laptop STT -> Pi translate (step 1)")
+    ap = argparse.ArgumentParser(description="Laptop mic -> STT -> Pi translate+speak")
     ap.add_argument("--seconds", type=int, default=5, help="recording length")
     ap.add_argument("--text", default=None,
                     help="skip the mic and send this text (SSH/translate test)")
@@ -86,15 +108,15 @@ def main():
     if args.text is not None:
         sys.exit(send_to_pi(args.text))
 
-    print(f"Push-to-talk EN -> {TGT_LANG} on {PI_HOST}. Ctrl-C to quit.")
+    print(f"Push-to-talk  EN -> {TGT_LANG}  (spoken on {PI_HOST}). Ctrl-C to quit.")
     try:
         while True:
-            input("press Enter to speak ")
+            input("\npress Enter, then speak... ")
+            print("  [transcribing locally...]")
             text = transcribe(args.seconds)
             if not text:
-                print("[no speech detected]")
+                print("  [no speech detected -- try again]")
                 continue
-            print("EN:", text)
             send_to_pi(text)
             if args.once:
                 break
