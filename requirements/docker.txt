@@ -9,7 +9,8 @@
 # 2 GB Pi). transformers is pulled in only for the tokenizer, not a model load.
 
 # int8 CPU inference runtime (aarch64 wheels: 4.8.x per plan §3).
-ctranslate2==4.8.0
+# Match the version used to CONVERT the model (dev box) so runtime == converter.
+ctranslate2==4.8.1
 # tokenizer only; pinned to the IndicTransToolkit-validated window (see dev.txt).
 transformers==4.52.4
 sentencepiece==0.2.0
