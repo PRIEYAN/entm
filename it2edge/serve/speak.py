@@ -64,14 +64,20 @@ def speak(text: str):
         )
 
     sr = _voice_sample_rate()
+    # ALSA device. "Host is down" / silence usually means the DEFAULT device is
+    # wrong; point ALSA_DEVICE at the real card (e.g. hw:0,0 for the Pi 3 B+
+    # headphone jack, which aplay -l shows as card 0). Empty = aplay's default.
+    aplay_cmd = ["aplay", "-q", "-r", sr, "-f", "S16_LE", "-t", "raw"]
+    device = os.environ.get("ALSA_DEVICE", "hw:0,0")
+    if device:
+        aplay_cmd += ["-D", device]
+    aplay_cmd.append("-")
+
     piper = subprocess.Popen(
         [PIPER_BIN, "--model", PIPER_VOICE, "--output-raw"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
     )
-    aplay = subprocess.Popen(
-        ["aplay", "-q", "-r", sr, "-f", "S16_LE", "-t", "raw", "-"],
-        stdin=piper.stdout,
-    )
+    aplay = subprocess.Popen(aplay_cmd, stdin=piper.stdout)
     piper.stdout.close()  # let aplay own the pipe end
     piper.stdin.write(text.encode("utf-8"))
     piper.stdin.close()
