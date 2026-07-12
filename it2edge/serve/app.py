@@ -41,7 +41,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from it2edge.paths import CT2_DIR, HF_SNAPSHOT, TOKENIZER_STAGE
-from it2edge.tokenizer_utils import load_indictrans_tokenizer
+from it2edge.tokenizer_utils import detokenize_target, load_indictrans_tokenizer
 
 try:
     from IndicTransToolkit.processor import IndicProcessor
@@ -144,15 +144,9 @@ def _translate(sentences: List[str], tgt_lang: str, beam_size: int,
         return_scores=False,
     )
 
-    decoded = []
-    for res in results:
-        hyp_tokens = res.hypotheses[0]
-        hyp_ids = tokenizer.convert_tokens_to_ids(hyp_tokens)
-        decoded.append(
-            tokenizer.decode(
-                hyp_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
-            )
-        )
+    # Detokenize target pieces directly; convert_tokens_to_ids/decode use the
+    # SOURCE vocab and blank out the target output. See detokenize_target.
+    decoded = [detokenize_target(res.hypotheses[0]) for res in results]
     return processor.postprocess_batch(decoded, lang=tgt_lang)
 
 

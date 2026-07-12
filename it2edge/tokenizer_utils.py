@@ -19,6 +19,21 @@ save_pretrained (which does inject those keys).
 
 import os
 
+_SPECIAL_TOKENS = ("</s>", "<s>", "<pad>", "<unk>")
+
+
+def detokenize_target(hyp_tokens):
+    """Reconstruct text from CT2's predicted TARGET SentencePiece pieces.
+
+    CT2 returns pieces like ['▁आज','▁सुबह',...]. Do NOT round-trip through
+    tokenizer.convert_tokens_to_ids + tokenizer.decode: those use the tokenizer's
+    SOURCE vocabulary, so target-language pieces map to <unk> and the output
+    comes out EMPTY. '▁' (U+2581) is SentencePiece's word-boundary marker.
+    IndicProcessor.postprocess_batch still runs afterwards for script fixup.
+    """
+    toks = [t for t in hyp_tokens if t not in _SPECIAL_TOKENS]
+    return "".join(toks).replace("▁", " ").strip()
+
 
 def load_indictrans_tokenizer(path):
     from transformers import AutoTokenizer

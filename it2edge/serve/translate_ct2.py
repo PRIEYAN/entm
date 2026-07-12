@@ -22,15 +22,12 @@ Usage (run from the project root):
 Greedy decoding (beam_size=1) is the default: on a Pi 3 it is several times
 faster than beam search for a small, usually acceptable quality drop.
 
-UNVERIFIED PATH -- read before trusting the output. IndicTrans2 routes the
-target language via the tags that IndicProcessor.preprocess_batch prepends to
-the SOURCE (unlike vanilla M2M100, which needs a decoder target_prefix), so
-this script passes no target_prefix. That matches IndicTrans2's design, but the
-raw-CT2 token round-trip here has not been run end to end. If translations come
-out empty, in the wrong language, or garbled, the likely culprit is target-token
-handling -- try adding target_prefix=[[tgt_token]] to translate_batch, or append
-the tokenizer's eos to each source_tokens list. Sanity-check a known sentence
-against `it2edge.serve.translate` (the PyTorch path) before relying on this on the Pi.
+Token handling (verified against the PyTorch path): IndicTrans2 routes the
+target language via the tags IndicProcessor.preprocess_batch prepends to the
+SOURCE (unlike vanilla M2M100), so NO target_prefix is passed. The predicted
+target subword pieces are detokenized directly ('▁'->space) rather than via
+tokenizer.decode, because the tokenizer's convert_tokens_to_ids/decode use the
+SOURCE vocab and would blank out the Hindi output.
 """
 
 import argparse
@@ -39,7 +36,7 @@ import os
 import ctranslate2
 
 from it2edge.paths import CT2_DIR, HF_SNAPSHOT
-from it2edge.tokenizer_utils import load_indictrans_tokenizer
+from it2edge.tokenizer_utils import detokenize_target, load_indictrans_tokenizer
 
 try:
     from IndicTransToolkit.processor import IndicProcessor
@@ -90,15 +87,9 @@ def translate(sentences, tgt_lang, tokenizer, translator, processor, beam_size=1
         max_decoding_length=256,
     )
 
-    # Turn the predicted target tokens back into ids, then decode to text.
-    decoded = []
-    for res in results:
-        hyp_tokens = res.hypotheses[0]
-        hyp_ids = tokenizer.convert_tokens_to_ids(hyp_tokens)
-        text = tokenizer.decode(
-            hyp_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
-        )
-        decoded.append(text)
+    # Detokenize target pieces directly (see detokenize_target): the id
+    # round-trip uses the SOURCE vocab and would blank out the Hindi output.
+    decoded = [detokenize_target(res.hypotheses[0]) for res in results]
 
     # Postprocess converts back to native script and cleans up spacing.
     return processor.postprocess_batch(decoded, lang=tgt_lang)
