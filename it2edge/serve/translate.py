@@ -93,7 +93,27 @@ def load(which: str = "auto"):
         trust_remote_code=True,
         # float16 only helps on GPU; keep float32 on CPU for correctness/speed.
         torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-    ).to(device)
+        # Force real (non-meta) parameter allocation on CPU before .to(device).
+        # from_pretrained defaults to low_cpu_mem_usage=True, which builds the
+        # module on the `meta` device and then only materializes keys that exist
+        # in the checkpoint. The PEFT merge_and_unload()+save_pretrained() dir can
+        # be missing a (tied) key -- e.g. shared/lm_head/embed_tokens or
+        # final_logits_bias -- so that parameter stays on `meta`, and the later
+        # .to("cuda") raises "Cannot copy out of meta tensor". Disabling the
+        # meta path allocates real storage for every parameter up front, so the
+        # copy to CUDA always has data. The stock dir happens to have a fully
+        # matching checkpoint, so it never leaves anything on meta.
+        low_cpu_mem_usage=False,
+    )
+    # Re-assert the input/output embedding tie AFTER a full (non-meta) load.
+    # This model shares the decoder input embedding with the output projection
+    # (share_decoder_input_output_embed=True). safetensors save writes that
+    # tensor once and drops the alias; low_cpu_mem_usage=False keeps it off the
+    # meta device, but the sibling may be a random-init copy rather than the
+    # loaded weight. tie_weights() restores the alias from the loaded embedding
+    # so logits are correct -- without it the model can load and emit garbage.
+    model.tie_weights()
+    model = model.to(device)
     model.eval()
 
     processor = IndicProcessor(inference=True)

@@ -79,7 +79,17 @@ def main() -> None:
     merged = PeftModel.from_pretrained(base_fp16, args.adapter_dir).merge_and_unload()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    merged.save_pretrained(args.output_dir)
+    # This model ties the decoder input embedding to the output projection
+    # (share_decoder_input_output_embed=True). merge_and_unload can sever that
+    # live tie; re-assert it before saving so both names point at one tensor.
+    merged = merged.to("cpu")
+    merged.tie_weights()
+    # safe_serialization=False (.bin) preserves the ALIASED tied tensor under
+    # every name. safetensors instead writes shared storage once and drops the
+    # sibling key -- which then reloads onto the `meta` device and crashes with
+    # "Cannot copy out of meta tensor" (or silently random-inits). .bin avoids
+    # the whole problem, so the merged dir loads standalone with correct logits.
+    merged.save_pretrained(args.output_dir, safe_serialization=False)
 
     # Make the merged dir self-contained and loadable, WITHOUT re-serializing
     # the remote tokenizer. tokenizer.save_pretrained() poisons
