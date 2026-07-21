@@ -1,35 +1,28 @@
-# IndicTrans2 dev-box dependencies: PyTorch inference + the full fine-tune/convert
-# pipeline (finetune_qlora -> merge_lora -> [prune] -> convert_ct2 / export_onnx).
-# The slim Pi/serving deps live in requirements/pi.txt and requirements/docker.txt.
+# Dev-laptop dependencies: MarianMT fine-tune + CT2 convert + benchmarks.
 #
-# transformers: the model ships a custom (remote) tokenizer. Newer transformers
-# (4.53+ / v5) break its __init__ with a "multiple values for 'src_vocab_file'"
-# TypeError. IndicTransToolkit is validated against >=4.51, so pin to that window.
-transformers>=4.51,<4.53
-torch
+# Install CUDA torch SEPARATELY if you have an NVIDIA GPU:
+#   pip uninstall -y torch
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# Then:
+#   pip install -r requirements/dev.txt
+#   pip install -e .
+
+transformers
 sentencepiece
 sacremoses
-# required by the model's SentencePiece-based remote tokenizer
 protobuf
-# for snapshot_download in it2edge.download_model
 huggingface_hub
+ctranslate2
+fastapi
+uvicorn[standard]
 
-# --- QLoRA fine-tune + merge (it2edge.train). Needs a 12–16 GB GPU. ---
-peft
-bitsandbytes
+# Fine-tune
 datasets
 accelerate
 evaluate
 sacrebleu
-# psutil: peak-RSS measurement in it2edge.evaluate.benchmark_models (latency mode).
 psutil
 
-# --- optional / alternative paths ---
-# torch-pruning        # it2edge.train.prune_structured (structured pruning)
-# optimum[exporters]   # it2edge.convert.export_onnx (ONNX alternative runtime)
-# onnx
-# onnxruntime
-
-# IndicProcessor (pre/post-processing) lives here. Installed from GitHub because
-# it is not published on PyPI:
-# IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git
+# torch is intentionally not pinned here — install the CUDA (or CPU) wheel
+# matching your machine first (see README).

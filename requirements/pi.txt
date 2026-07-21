@@ -1,17 +1,11 @@
-# IndicTrans2 CTranslate2 int8 inference deps -- for the Raspberry Pi (64-bit OS).
-#
-# NOTE: no torch here. The CT2 runtime replaces PyTorch for inference, which is
-# the whole point on a memory-constrained Pi 3. ctranslate2 has aarch64 wheels,
-# so this needs a 64-bit Raspberry Pi OS (32-bit / armv7 has no wheels).
+# Raspberry Pi (64-bit / aarch64) — MarianMT CTranslate2 int8 inference.
+# No torch. No IndicTransToolkit.
+
 ctranslate2
-# transformers is used ONLY for the tokenizer here (no model load), so the heavy
-# torch backend is never imported at runtime.
-transformers>=4.51,<4.53
+transformers
 sentencepiece
 sacremoses
 protobuf
-# psutil: peak-RSS measurement in it2edge.evaluate.benchmark_models (latency mode).
+fastapi
+uvicorn[standard]
 psutil
-# IndicProcessor is needed ONLY for the IndicTrans2 path (pre/post-processing).
-# The compact Marian path (MODEL_TYPE=marian) does NOT need it. Not on PyPI:
-#   pip install git+https://github.com/VarunGumma/IndicTransToolkit.git

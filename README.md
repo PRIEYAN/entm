@@ -1,43 +1,73 @@
-# it2edge — Offline English → Hindi translation for edge devices
+# it2edge — Production setup (English → Hindi, edge)
 
-Local neural machine translation for **English → Hindi**, optimized for a
-**1 GB Raspberry Pi**. The recommended on-device model is a compact **~77M
-MarianMT** pipeline (download → fine-tune → CTranslate2 int8 → serve). The
-larger IndicTrans2 200M model is retained as an **off-device quality reference**
-only — it is too slow for acceptable latency on a 1 GB Pi.
+Offline **English → Hindi** neural translation for a **1 GB Raspberry Pi**, built around
+[`AI4INDIANS/better-opus-mt-en-hi`](https://huggingface.co/AI4INDIANS/better-opus-mt-en-hi)
+(~77M MarianMT).
 
-| | Compact Marian (recommended) | IndicTrans2 (reference) |
-|---|---|---|
-| Model | ~77M en→hi MarianMT | ~200M en→Indic distilled |
-| On-device use | Yes (Pi runtime) | No (too slow on 1 GB) |
-| Languages | English → Hindi | English → 22 Indic languages |
-| Toolkit | transformers + ctranslate2 | + IndicTransToolkit |
+**What this repo does end-to-end**
 
-Package: `it2edge` · Python **≥ 3.11** · Offline after model download.
+1. Download a revision-pinned Marian base on a developer laptop  
+2. (Optional) A/B-compare bases on your held-out data  
+3. Fine-tune on your English–Hindi corpus (4 GB GPU–safe defaults)  
+4. Convert to **CTranslate2 int8**  
+5. Serve via CLI or FastAPI  
+6. Deploy the same artifact to a **64-bit Raspberry Pi**  
+7. Gate release on quality + Pi latency / RAM  
 
----
-
-## Prerequisites (developer laptop)
-
-| Requirement | Notes |
+| | |
 |---|---|
-| OS | Windows 10/11, macOS, or Linux (x86-64) |
-| Python | **3.11.x** (see `.python-version`) — create a fresh venv |
-| Disk | ~5–15 GB free (models + checkpoints + CT2 artifacts) |
-| Network | Required once for Hugging Face downloads |
-| GPU (optional but recommended) | NVIDIA GPU + CUDA driver for fine-tuning. A **4 GB** card (e.g. GTX 1650) works with the compact Marian defaults. |
+| Package | `it2edge` **0.2.0** |
+| Python | **≥ 3.11** (pin: `.python-version` → 3.11.x) |
+| Language pair | English → Hindi only |
+| Runtime on device | CTranslate2 int8 (no PyTorch on the Pi) |
+| License (model) | Apache-2.0 (OPUS / Samanantar lineage) |
 
-> **Critical:** `pip install torch` often installs a **CPU-only** wheel. Fine-tuning
-> then silently runs on CPU and can take days. Install a **CUDA build** of PyTorch
-> if you have an NVIDIA GPU (see [Step 2](#2-install-pytorch-cuda-if-you-have-an-nvidia-gpu)).
+```
+[DEV LAPTOP]                          [RASPBERRY PI 64-bit]
+download → A/B → fine-tune → CT2 int8 ──copy──► serve (:8080) / latency gate
+```
 
 ---
 
-## Quick start — laptop setup
+## 1. Roles and machines
 
-Run every command from the **repository root** (`d:\entm` / wherever you cloned).
+| Machine | Job | Needs internet? |
+|---|---|---|
+| **Dev laptop** (x86-64) | Download, A/B, fine-tune, convert, quality bench | Yes (once) for HF download |
+| **Raspberry Pi** (aarch64, 64-bit OS) | Warm CT2 serve + latency bench | No (after artifact copy) |
 
-### 1. Clone and create a virtualenv
+> **32-bit Pi OS is not supported.** `ctranslate2` has no armv7 wheels.
+
+---
+
+## 2. Prerequisites
+
+### Dev laptop
+
+| Item | Requirement |
+|---|---|
+| OS | Windows 10/11, macOS, or Linux |
+| Python | 3.11.x in a fresh virtualenv |
+| Disk | ~10–20 GB free (models + checkpoints + CT2) |
+| GPU | NVIDIA recommended; **4 GB VRAM** is enough for Marian fine-tune with defaults |
+| Driver | Current NVIDIA driver (`nvidia-smi` works) |
+
+### Raspberry Pi
+
+| Item | Requirement |
+|---|---|
+| Board | Pi 3 / 4 / 5 with **64-bit** Raspberry Pi OS |
+| RAM | 1 GB minimum (targets assume 1 GB with headroom) |
+| Python | 3.11+ preferred |
+| Artifact | `model_cache_compact_ct2/` copied from the laptop |
+
+---
+
+## 3. Dev laptop — environment setup
+
+Run all commands from the **repository root**.
+
+### 3.1 Clone and venv
 
 ```bash
 git clone <this-repo-url> entm
@@ -57,72 +87,65 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 ```
 
-### 2. Install PyTorch (CUDA if you have an NVIDIA GPU)
+### 3.2 Install PyTorch (CUDA if you have an NVIDIA GPU)
 
-**With NVIDIA GPU** (example: CUDA 12.1 — match your driver; see
-[pytorch.org/get-started](https://pytorch.org/get-started/locally/)):
+**Do this before `requirements/dev.txt`.** A plain `pip install torch` often installs a
+**CPU-only** wheel; fine-tuning then silently runs on CPU for days.
 
 ```bash
+# Example: CUDA 12.1 (choose the index that matches your driver —
+# https://pytorch.org/get-started/locally/)
 python -m pip uninstall -y torch
 python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
-```
 
-Verify:
-
-```bash
+# Verify — expect True and your GPU name
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
-Expect something like `2.5.1+cu121 True NVIDIA GeForce GTX 1650`.
+CPU-only is OK for download / convert / smoke tests with `--max_train_samples`, not for a full train.
 
-**CPU only** (smoke tests / conversion only — full fine-tune will be very slow):
-
-```bash
-python -m pip install torch
-```
-
-### 3. Install project dependencies
+### 3.3 Install project dependencies
 
 ```bash
 python -m pip install -r requirements/dev.txt
 python -m pip install -e .
 ```
 
-Optional (only if you will run the IndicTrans2 reference path):
+### 3.4 Sanity check
 
 ```bash
-python -m pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
-```
-
-`IndicTransToolkit` is **not** on PyPI and is **not** required for the compact
-Marian path.
-
-### 4. Confirm the install
-
-```bash
-python -c "import transformers, ctranslate2, sacrebleu; print('ok')"
-python -m it2edge.download_compact_model --help
+python -c "import transformers, ctranslate2, sacrebleu, fastapi; print('deps ok')"
+python -m it2edge.download_model --help
 ```
 
 ---
 
-## Recommended path — compact Marian (Pi-ready)
+## 4. End-to-end pipeline (laptop)
 
-Full detail: [`docs/compact-model.md`](docs/compact-model.md).
-
-### A. Download the base model (once, needs internet)
+### Step A — Download the base model (once)
 
 ```bash
-python -m it2edge.download_compact_model
-# optional control model for A/B quality comparison:
-python -m it2edge.download_compact_model --control
+python -m it2edge.download_model
+# A/B control (official OPUS):
+python -m it2edge.download_model --control
+# or both:
+python -m it2edge.download_model --all
 ```
 
-Writes `model_cache_compact/` plus `provenance.json` (pinned Hugging Face revision).
+| Output | Meaning |
+|---|---|
+| `model_cache_compact/better-opus-mt-en-hi/` | Primary base + `provenance.json` (pinned revision) |
+| `model_cache_compact/opus-mt-en-hi/` | Optional control |
 
-### B. Prepare / use the parallel corpus
+Pinned SHAs live in [`it2edge/paths.py`](it2edge/paths.py).
 
-The repo expects line-aligned English–Hindi files:
+**Check:** folder contains `config.json` and `model.safetensors` (or convertible weights).
+
+---
+
+### Step B — Corpus
+
+Expected layout (line-aligned UTF-8):
 
 ```
 en-indic-exp/
@@ -132,228 +155,329 @@ en-indic-exp/
   dev/eng_Latn-hin_Deva/dev.hin_Deva
 ```
 
-If you start from `Dataset_English_Hindi.csv`:
+From `Dataset_English_Hindi.csv`:
 
 ```bash
 python -m it2edge.train.prepare_data \
   --csv Dataset_English_Hindi.csv \
   --tgt_lang hin_Deva \
+  --dev_frac 0.01 \
   --out_dir en-indic-exp
 ```
 
-### C. Fine-tune (GPU recommended)
+**Check:** train and dev line counts match for `eng_Latn` / `hin_Deva` pairs.
 
-Smoke test first (~2k rows):
+---
 
-```bash
-python -m it2edge.train.finetune_compact_marian \
-  --data_dir en-indic-exp \
-  --max_train_samples 2000
-```
+### Step C — A/B base models (recommended before a long fine-tune)
 
-Full corpus (~129k train / ~1.3k validation):
+Scores candidates on the **same** held-out `dev` set (BLEU, chrF++, safety).
 
 ```bash
-python -m it2edge.train.finetune_compact_marian --data_dir en-indic-exp
+# smoke (100 pairs)
+python -m it2edge.evaluate.ab_compare_models --data_dir en-indic-exp --max_samples 100
+
+# full dev set
+python -m it2edge.evaluate.ab_compare_models --data_dir en-indic-exp --out ab_report.json
 ```
 
-Defaults are tuned for **4 GB VRAM**: fp16, batch size 1, gradient accumulation 16,
-gradient checkpointing, sequence caps 96/128, early stopping on validation chrF++.
-
-Output: `model_cache_compact_ft/`
-
-### D. Convert to CTranslate2 int8
+Optional third candidate:
 
 ```bash
-python -m it2edge.convert.convert_compact_ct2
+python -m it2edge.evaluate.ab_compare_models --data_dir en-indic-exp \
+  --extra HPLT/translate-en-hi-v1.0-hplt --out ab_report.json
 ```
 
-Output: `model_cache_compact_ct2/` (weights + tokenizer files in one directory).
+**Check:** `ab_report.json` → `winner_by_chrf_pp`. Keep `better-opus-mt-en-hi` unless another base clearly wins.
 
-### E. Local smoke translate
+> Tip: Official OPUS often ships only `pytorch_model.bin`. The A/B tool converts it to
+> `model.safetensors` once (required with torch 2.5.x).
+
+---
+
+### Step D — Fine-tune
+
+Defaults are tuned for **4 GB VRAM**: fp16, batch 1, grad-accum 16, gradient checkpointing,
+sequence caps 96/128, LR `2e-5`, ≤3 epochs, early stop on validation **chrF++**.
 
 ```bash
-python -m it2edge.serve.translate_ct2 --marian "Hello, how are you?"
+# smoke
+python -m it2edge.train.finetune_marian --data_dir en-indic-exp --max_train_samples 2000
+
+# full corpus (~129k train / ~1.3k validation)
+python -m it2edge.train.finetune_marian --data_dir en-indic-exp
 ```
 
-### F. Quality benchmark (dev laptop)
+| Output | Meaning |
+|---|---|
+| `model_cache_compact_ft/` | Best HF checkpoint + tokenizer |
+
+**Check:** no CUDA OOM; `model_cache_compact_ft/` contains weights + tokenizer files.
+
+If OOM: lower `--max_source_length` / `--max_target_length` (keep batch 1).
+
+---
+
+### Step E — Convert to CTranslate2 int8
+
+```bash
+# uses model_cache_compact_ft/ by default
+python -m it2edge.convert.convert_ct2
+
+# or convert the unfine-tuned base:
+python -m it2edge.convert.convert_ct2 --model model_cache_compact/better-opus-mt-en-hi
+```
+
+| Output | Meaning |
+|---|---|
+| `model_cache_compact_ct2/` | Deployable int8 model **plus** tokenizer files |
+
+If the output dir already exists, delete/rename it before re-converting.
+
+**Check:**
+
+```bash
+python -m it2edge.serve.translate_ct2 "Hello, how are you?"
+```
+
+---
+
+### Step F — Quality benchmark (laptop)
 
 ```bash
 python -m it2edge.evaluate.benchmark_models quality \
-  --model_type marian \
   --ct2_dir model_cache_compact_ct2 \
   --data_dir en-indic-exp \
-  --out report_marian_ft.json
+  --out report_marian.json
 ```
 
-### G. Serve locally (HTTP)
+Reports BLEU, chrF++, empty/untranslated/repetition/malformed rates, plus a 100-sentence review sample.
+
+---
+
+### Step G — Local HTTP service
 
 ```bash
-# Windows PowerShell
-$env:MODEL_TYPE = "marian"
 uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
-
-# macOS / Linux
-MODEL_TYPE=marian uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
 ```
 
 ```bash
 curl -s http://127.0.0.1:8080/health
+# -> {"status":"ok"} once warm (503 until then)
+
 curl -s http://127.0.0.1:8080/translate \
   -H "content-type: application/json" \
-  -d "{\"text\":\"Hello, how are you?\",\"tgt_lang\":\"hin_Deva\"}"
+  -d "{\"text\":\"Hello, how are you?\"}"
 ```
+
+**API**
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/health` | — | `{"status":"ok"}` or 503 |
+| `POST` | `/translate` | `text` **or** `texts`, optional `beam_size`, `max_decoding_length` | `{tgt_lang, translations}` |
+
+Use **one worker** on low-RAM devices so the model is not duplicated.
 
 ---
 
-## Raspberry Pi (64-bit) — deploy the compact model
+## 5. Raspberry Pi — deploy
 
-**Requires 64-bit Raspberry Pi OS (aarch64).** `ctranslate2` has no armv7 wheels.
+### 5.1 Copy the artifact
 
-1. On the laptop, complete steps A–D above.
-2. Copy `model_cache_compact_ct2/` to the Pi.
-3. On the Pi:
+From the laptop:
 
 ```bash
+scp -r model_cache_compact_ct2 pi@<pi-ip>:~/entm/
+# also copy the repo (or at least it2edge/ + requirements/pi.txt)
+```
+
+### 5.2 Bare-metal serve
+
+```bash
+cd ~/entm
 python -m venv venv && source venv/bin/activate
 pip install -r requirements/pi.txt
 pip install -e .
 
-python -m it2edge.serve.translate_ct2 --marian "Hello, how are you?"
+python -m it2edge.serve.translate_ct2 "Hello, how are you?"
 
-MODEL_TYPE=marian uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
+uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
 ```
 
-Latency check on the Pi:
+### 5.3 Latency gate (on the Pi)
 
 ```bash
 python -m it2edge.evaluate.benchmark_models latency \
-  --model_type marian \
   --ct2_dir model_cache_compact_ct2 \
   --data_dir en-indic-exp \
   --intra 4 \
-  --out pi_latency_marian.json
+  --out pi_latency.json
 ```
 
-**Release targets (see `docs/compact-model.md`):** median translate ≤ 5 s, p95 ≤ 8 s,
-peak RSS ≤ 700 MB, quality gates vs the off-device IndicTrans2 reference.
+### 5.4 Container (optional)
 
----
-
-## IndicTrans2 path (quality reference / multi-language)
-
-Use this on a **dev laptop** for quality comparison or multi-Indic experiments.
-Do **not** treat it as the 1 GB Pi runtime.
+| Script / unit | Purpose |
+|---|---|
+| [`deploy/build_arm64.sh`](deploy/build_arm64.sh) | Cross-build arm64 image on the laptop (Podman) |
+| [`deploy/build_on_pi.sh`](deploy/build_on_pi.sh) | Native build + run on the Pi |
+| [`deploy/it2.container`](deploy/it2.container) | systemd Quadlet auto-start |
+| [`deploy/Containerfile`](deploy/Containerfile) | OCI image definition |
 
 ```bash
-pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
-python -m it2edge.download_model
-python -m it2edge.serve.translate "Hello, how are you?"          # torch
-python -m it2edge.convert.convert_ct2                            # -> model_cache_ct2/
-python -m it2edge.serve.translate_ct2 "Hello, how are you?"      # CT2
+# On Pi, after model_cache_compact_ct2/ is present:
+bash deploy/build_on_pi.sh
 ```
-
-QLoRA fine-tune of IndicTrans2 needs roughly a **12–16 GB** GPU — see
-[`docs/plan.md`](docs/plan.md) and [`docs/start.md`](docs/start.md).
-
-> **transformers pin for IndicTrans2:** that model’s remote tokenizer breaks on
-> some newer transformers releases. Prefer `transformers>=4.51,<4.53` when using
-> IndicTrans2. The compact Marian path is more tolerant of newer transformers;
-> keep one venv dedicated to each path if you hit version conflicts.
-
-### Language codes (IndicTrans2)
-
-Source is always `eng_Latn`. Common targets: `hin_Deva`, `tam_Taml`, `ben_Beng`,
-`tel_Telu`, `mar_Deva`, `guj_Gujr`, `kan_Knda`, `mal_Mlym`, `pan_Guru`, `urd_Arab`.
 
 ---
 
-## Project layout
+## 6. Release gates (ship only if all pass)
 
-```
-it2edge/
-  paths.py                     # paths + model IDs (single source of truth)
-  download_model.py            # IndicTrans2 HF snapshot
-  download_compact_model.py    # Marian base (revision-pinned)
-  train/                       # QLoRA, Marian fine-tune, prepare_data, prune
-  convert/                     # CT2 / ONNX converters
-  serve/                       # FastAPI app, CLI translate, Marian CT2 helper
-  evaluate/                    # quality + latency benchmarks
-deploy/                        # Containerfile, arm64 build, Quadlet
-requirements/                  # dev.txt · pi.txt · docker.txt · laptop.txt
-docs/                          # plan · start · compact-model · STT-TTS · reduceParams
-en-indic-exp/                  # parallel English–Hindi corpus
-```
-
-### Console commands (after `pip install -e .`)
-
-| Command | Purpose |
+| Gate | Threshold |
 |---|---|
-| `it2-download-compact` | Download Marian base |
-| `it2-finetune-compact` | Fine-tune Marian on project corpus |
-| `it2-convert-compact-ct2` | Marian → CT2 int8 |
-| `it2-benchmark` | Quality / latency reports |
-| `it2-download` | Download IndicTrans2 |
-| `it2-translate` / `it2-translate-ct2` | CLI translation |
-| `it2-finetune` / `it2-merge` / `it2-convert-ct2` | IndicTrans2 train/convert |
+| Warm translate latency (Pi) | **median ≤ 5 s**, **p95 ≤ 8 s** |
+| Peak process RSS (Pi) | **≤ 700 MB** |
+| Reliability (dev set) | no empty outputs; unsafe fraction **&lt; 1%** |
+| Human review | **≥ 90 / 100** samples acceptable for your domain |
+| Fine-tune value | fine-tuned ≥ base on project chrF++ / failure rate |
 
-Equivalent: `python -m it2edge.<module>`.
+If a gate fails, do **not** replace a previous good `model_cache_compact_ct2/` build.
 
-### Artifacts (git-ignored — regenerate locally)
+### Rollback
 
-| Directory | Contents |
-|---|---|
-| `model_cache_compact/` | Downloaded Marian base |
-| `model_cache_compact_ft/` | Fine-tuned Marian checkpoint |
-| `model_cache_compact_ct2/` | Deployable CT2 int8 (Pi) |
-| `model_cache/` / `model_cache_ct2/` | IndicTrans2 snapshot / CT2 |
-| `lora_adapters/` / `model_cache_merged/` | IndicTrans2 QLoRA artifacts |
+Keep the last known-good CT2 directory. Point the service at it:
+
+```bash
+# Linux / macOS
+export CT2_MODEL_DIR=/path/to/previous_model_cache_compact_ct2
+
+# Windows PowerShell
+$env:CT2_MODEL_DIR = "D:\path\to\previous_model_cache_compact_ct2"
+
+uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
+```
+
+Or reconvert the base without fine-tuning:
+
+```bash
+python -m it2edge.convert.convert_ct2 --model model_cache_compact/better-opus-mt-en-hi
+```
 
 ---
 
-## Environment variables (serving)
+## 7. Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MODEL_TYPE` | `indictrans` | `marian` for compact Pi path |
-| `CT2_MODEL_DIR` | path by model type | CT2 model directory |
-| `TOKENIZER_DIR` | snapshot / CT2 dir | Tokenizer location |
+| `CT2_MODEL_DIR` | `model_cache_compact_ct2` | CT2 package directory |
+| `TOKENIZER_DIR` | same as `CT2_MODEL_DIR` | Marian tokenizer (copied into CT2 dir by convert) |
 | `CT2_INTER_THREADS` | `1` | Parallel translations |
-| `CT2_INTRA_THREADS` | `2` | Threads per translation |
-| `DEFAULT_TGT_LANG` | `hin_Deva` | Default target language |
+| `CT2_INTRA_THREADS` | `2` (use `4` on Pi 3/4 if helpful) | Threads per translation |
 | `DEFAULT_BEAM_SIZE` | `1` | Greedy decode (fastest) |
+| `OMP_NUM_THREADS` | `2` (set in container) | OpenMP threads |
 
 ---
 
-## Troubleshooting
+## 8. CLI reference (`pip install -e .`)
+
+| Command | Module equivalent | Purpose |
+|---|---|---|
+| `it2-download` | `python -m it2edge.download_model` | Download base / control |
+| `it2-prepare-data` | `python -m it2edge.train.prepare_data` | CSV → corpus |
+| `it2-ab-compare` | `python -m it2edge.evaluate.ab_compare_models` | A/B bases on dev |
+| `it2-finetune` | `python -m it2edge.train.finetune_marian` | Fine-tune |
+| `it2-convert-ct2` | `python -m it2edge.convert.convert_ct2` | HF → CT2 int8 |
+| `it2-translate-ct2` | `python -m it2edge.serve.translate_ct2` | CLI translate |
+| `it2-benchmark` | `python -m it2edge.evaluate.benchmark_models` | Quality / latency |
+
+---
+
+## 9. Repository layout
+
+```
+it2edge/
+  paths.py                 # MODEL_ID, revisions, artifact paths
+  download_model.py        # revision-pinned HF snapshot
+  corpus_utils.py          # parallel-file helpers
+  train/                   # prepare_data, finetune_marian
+  convert/                 # convert_ct2
+  serve/                   # app (FastAPI), translate_ct2, marian_ct2, speak
+  evaluate/                # ab_compare_models, benchmark_models
+deploy/                    # Containerfile, build_*.sh, it2.container
+requirements/              # dev.txt (laptop), pi.txt (device), docker.txt (image)
+docs/                      # compact-model.md, STT-TTS.md, start.md
+en-indic-exp/              # English–Hindi parallel corpus
+```
+
+### Git-ignored artifacts (regenerate; do not commit)
+
+| Path | Contents |
+|---|---|
+| `model_cache_compact/` | Downloaded HF bases |
+| `model_cache_compact_ft/` | Fine-tuned HF checkpoint |
+| `model_cache_compact_ct2/` | **Ship this to the Pi** |
+| `ab_report.json`, `report_*.json`, `pi_latency*.json` | Benchmark outputs |
+
+---
+
+## 10. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `no CUDA GPU detected` but `nvidia-smi` works | You installed CPU torch. Reinstall the CUDA wheel (Step 2). |
-| `ModuleNotFoundError: sacrebleu` | `pip install sacrebleu` (also in `requirements/dev.txt`). |
-| `Seq2SeqTrainer ... unexpected keyword argument 'tokenizer'` | Newer transformers renamed this to `processing_class` — already handled in `finetune_compact_marian.py`. Update to latest repo code. |
-| CUDA out of memory on 4 GB | Lower `--max_source_length` / `--max_target_length`, keep batch size 1, or use `--max_train_samples` for a smoke run. |
-| `got multiple values for keyword argument 'src_vocab_file'` (IndicTrans2) | Clear `model_cache` and HF module cache; re-run `it2edge.download_model`. Prefer transformers `<4.53` for that path. |
-| Pi install fails for ctranslate2 | Device is likely 32-bit. Reflash to **64-bit** Raspberry Pi OS. |
+| `cuda_available False` but `nvidia-smi` works | CPU torch installed — reinstall the CUDA wheel (section 3.2) |
+| Fine-tune extremely slow | Confirm CUDA; do not train full corpus on CPU |
+| `ModuleNotFoundError: sacrebleu` | `pip install sacrebleu` |
+| `Seq2SeqTrainer ... unexpected keyword 'tokenizer'` | Use current repo (`processing_class=`); refresh checkout |
+| CUDA OOM on 4 GB | Lower seq lengths; keep `--batch_size 1` |
+| Convert says output dir exists | Remove/rename `model_cache_compact_ct2/` |
+| OPUS load fails on `.bin` (torch 2.5) | Run A/B or convert once — script writes `model.safetensors` |
+| Pi: `ctranslate2` install fails | Reflash to **64-bit** OS (`uname -m` → `aarch64`) |
+| `/health` returns 503 | Model still loading; wait for warm startup |
+| High latency on Pi | Confirm greedy `beam_size=1`, warm process, `CT2_INTRA_THREADS` ≈ core count |
 
 ---
 
-## Documentation map
+## 11. Optional voice path
+
+Laptop mic → Whisper STT → Pi Marian translate → Piper TTS. See
+[`docs/STT-TTS.md`](docs/STT-TTS.md). Translation remains Marian CT2 on the Pi
+(`python -m it2edge.serve.speak "Hello"`).
+
+---
+
+## 12. Further docs
 
 | Doc | Contents |
 |---|---|
-| [`docs/compact-model.md`](docs/compact-model.md) | Marian pipeline, release gates, rollback |
-| [`docs/start.md`](docs/start.md) | Ordered IndicTrans2 → deploy walkthrough |
-| [`docs/plan.md`](docs/plan.md) | Design rationale (QLoRA, CT2, pruning) |
-| [`docs/STT-TTS.md`](docs/STT-TTS.md) | Optional voice path (Whisper + Piper) |
-| [`docs/reduceParams.md`](docs/reduceParams.md) | Why shrinking IndicTrans2 in-place is wrong |
-| [`des.txt`](des.txt) | Hardware cost and latency notes |
+| [`docs/compact-model.md`](docs/compact-model.md) | Provenance, gates, rollback |
+| [`docs/start.md`](docs/start.md) | Short command checklist |
+| [`docs/STT-TTS.md`](docs/STT-TTS.md) | Voice pipeline |
+| [`des.txt`](des.txt) | Hardware cost / latency notes |
+| [`docs/plan.md`](docs/plan.md) / [`docs/reduceParams.md`](docs/reduceParams.md) | **Archived** (old IndicTrans2 design) |
 
 ---
 
-## License notes
+## 13. Quick checklist (copy/paste)
 
-- Compact Marian base / control: **Apache-2.0** (Helsinki-NLP OPUS lineage;
-  Samanantar fine-tune per model card).
-- IndicTrans2 / IndicTransToolkit: follow upstream model and toolkit licenses.
-- Project code: see repository license (if present) or ask the maintainers.
+```bash
+# --- LAPTOP ---
+python -m venv venv && source venv/bin/activate   # or Windows Activate.ps1
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements/dev.txt && pip install -e .
+
+python -m it2edge.download_model --all
+python -m it2edge.evaluate.ab_compare_models --data_dir en-indic-exp --max_samples 100
+python -m it2edge.train.finetune_marian --data_dir en-indic-exp --max_train_samples 2000
+python -m it2edge.train.finetune_marian --data_dir en-indic-exp
+python -m it2edge.convert.convert_ct2
+python -m it2edge.serve.translate_ct2 "Hello, how are you?"
+python -m it2edge.evaluate.benchmark_models quality \
+  --ct2_dir model_cache_compact_ct2 --data_dir en-indic-exp --out report_marian.json
+uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
+
+# --- PI (after scp model_cache_compact_ct2/) ---
+pip install -r requirements/pi.txt && pip install -e .
+uvicorn it2edge.serve.app:app --host 0.0.0.0 --port 8080 --workers 1
+python -m it2edge.evaluate.benchmark_models latency \
+  --ct2_dir model_cache_compact_ct2 --data_dir en-indic-exp --intra 4 --out pi_latency.json
+```

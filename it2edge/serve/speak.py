@@ -1,23 +1,12 @@
-"""STEP 2: translate English -> Hindi and SPEAK it on the Pi's speaker (offline).
+"""Translate English → Hindi and speak it on the Pi's speaker (offline).
 
-Runs ON THE RASPBERRY PI. Reuses the working CT2 int8 translator, then pipes the
-Hindi text through Piper TTS and plays it out the Pi's default ALSA device.
-No network calls -- fully offline once Piper + the voice model are installed.
-
-Invoked locally or over SSH from the laptop:
     python -m it2edge.serve.speak "Hello, how are you?"
-    python -m it2edge.serve.speak --tgt hin_Deva "Good morning."
     python -m it2edge.serve.speak --no-audio "test"     # translate + print only
 
-Setup on the Pi (see STT-TTS.md Part 3):
-    # 1) Piper binary (aarch64):
-    #    wget .../piper_linux_aarch64.tar.gz && tar -xf ...   -> ~/piper/piper
-    # 2) a Hindi voice (.onnx + .onnx.json) into ~/piper_voices/
-    # 3) a speaker on the Pi (3.5mm/USB), tested with `speaker-test`
-Configure the paths below via env if yours differ:
+Configure Piper paths via env if yours differ:
     PIPER_BIN   (default ~/piper/piper)
     PIPER_VOICE (default ~/piper_voices/hi_IN-pratham-medium.onnx)
-    PIPER_SR    (default 22050; match the voice's .onnx.json audio.sample_rate)
+    PIPER_SR    (default 22050)
 """
 
 import argparse
@@ -25,10 +14,9 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 
-from it2edge.paths import CT2_DIR, HF_SNAPSHOT
-from it2edge.serve.translate_ct2 import load, translate
+from it2edge.paths import CT2_DIR
+from it2edge.serve.marian_ct2 import load_marian, translate_marian
 
 PIPER_BIN = os.environ.get("PIPER_BIN", os.path.expanduser("~/piper/piper"))
 PIPER_VOICE = os.environ.get(
@@ -37,7 +25,6 @@ PIPER_VOICE = os.environ.get(
 
 
 def _voice_sample_rate(default="22050"):
-    """Read the voice's sample rate from its .onnx.json so aplay matches it."""
     cfg = PIPER_VOICE + ".json"
     try:
         with open(cfg, encoding="utf-8") as fh:
@@ -47,10 +34,9 @@ def _voice_sample_rate(default="22050"):
 
 
 def speak(text: str):
-    """Pipe `text` through Piper and play the audio out the default ALSA device."""
     if not os.path.isfile(PIPER_BIN):
         raise SystemExit(
-            f"Piper binary not found at {PIPER_BIN}. Install it (see STT-TTS.md) "
+            f"Piper binary not found at {PIPER_BIN}. Install it (see docs/STT-TTS.md) "
             "or set PIPER_BIN."
         )
     if not os.path.isfile(PIPER_VOICE):
@@ -60,22 +46,18 @@ def speak(text: str):
         )
 
     sr = _voice_sample_rate()
-
-    # Two output backends:
-    #   AUDIO_OUT=alsa  (default) -> aplay straight to an ALSA device (wired jack,
-    #                    hw:0,0). Bypasses PulseAudio -- does NOT reach Bluetooth.
-    #   AUDIO_OUT=pulse          -> paplay via PulseAudio. Use this for a
-    #                    BLUETOOTH speaker (set it default with
-    #                    `pactl set-default-sink <bluez_sink>` first).
     backend = os.environ.get("AUDIO_OUT", "alsa").lower()
     if backend == "pulse":
-        play_cmd = ["paplay", "--raw", f"--rate={sr}", "--format=s16le",
-                    "--channels=1"]
+        play_cmd = [
+            "paplay", "--raw", f"--rate={sr}", "--format=s16le", "--channels=1"
+        ]
         sink = os.environ.get("PULSE_SINK", "")
         if sink:
             play_cmd += [f"--device={sink}"]
         if shutil.which("paplay") is None:
-            raise SystemExit("paplay not found. Install:  sudo apt install -y pulseaudio-utils")
+            raise SystemExit(
+                "paplay not found. Install:  sudo apt install -y pulseaudio-utils"
+            )
     else:
         play_cmd = ["aplay", "-q", "-r", sr, "-f", "S16_LE", "-t", "raw"]
         device = os.environ.get("ALSA_DEVICE", "hw:0,0")
@@ -83,14 +65,17 @@ def speak(text: str):
             play_cmd += ["-D", device]
         play_cmd.append("-")
         if shutil.which("aplay") is None:
-            raise SystemExit("aplay not found. Install:  sudo apt install -y alsa-utils")
+            raise SystemExit(
+                "aplay not found. Install:  sudo apt install -y alsa-utils"
+            )
 
     piper = subprocess.Popen(
         [PIPER_BIN, "--model", PIPER_VOICE, "--output-raw"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
     )
     player = subprocess.Popen(play_cmd, stdin=piper.stdout)
-    piper.stdout.close()  # let the player own the pipe end
+    piper.stdout.close()
     piper.stdin.write(text.encode("utf-8"))
     piper.stdin.close()
     player.wait()
@@ -98,24 +83,28 @@ def speak(text: str):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Translate EN->Indic and speak on the Pi")
+    ap = argparse.ArgumentParser(description="Translate EN→HI and speak on the Pi")
     ap.add_argument("text", nargs="*", help="English text to translate + speak")
-    ap.add_argument("--tgt", default="hin_Deva", help="target language code")
     ap.add_argument("--beams", type=int, default=1, help="beam size (1=greedy)")
-    ap.add_argument("--no-audio", action="store_true",
-                    help="translate + print only, do not synthesize/play")
+    ap.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="translate + print only, do not synthesize/play",
+    )
     ap.add_argument("--model_dir", default=str(CT2_DIR))
-    ap.add_argument("--tokenizer_dir", default=str(HF_SNAPSHOT))
+    ap.add_argument("--tokenizer_dir", default=None)
     args = ap.parse_args()
 
     if not args.text:
         raise SystemExit('usage: python -m it2edge.serve.speak "English text"')
     english = " ".join(args.text)
 
-    tokenizer, translator, processor = load(args.model_dir, args.tokenizer_dir)
-    hindi = translate([english], args.tgt, tokenizer, translator, processor, args.beams)[0]
+    tokenizer, translator = load_marian(args.model_dir, args.tokenizer_dir)
+    hindi = translate_marian(
+        [english], tokenizer, translator, beam_size=args.beams
+    )[0]
     print(f"EN: {english}")
-    print(f"-> ({args.tgt}): {hindi}")
+    print(f"-> {hindi}")
 
     if not args.no_audio:
         speak(hindi)

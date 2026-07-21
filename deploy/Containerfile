@@ -1,56 +1,32 @@
-# arm64 serving image for IndicTrans2 en-indic (CTranslate2 int8). Plan §7.
+# arm64 serving image for MarianMT en→hi (CTranslate2 int8).
 #
-# Podman- and Docker-compatible (identical OCI content). Build for arm64 with
-# deploy/build_arm64.sh, push to a registry, pull on the Pi. Run on the Pi with
-# the deploy/it2.container Quadlet unit (plan §8).
+# Build context is the PROJECT ROOT:
+#   podman build -f deploy/Containerfile .
 #
-# BUILD CONTEXT IS THE PROJECT ROOT (not deploy/), so COPY paths are repo-root
-# relative. build_arm64.sh handles this: `podman build -f deploy/Containerfile .`
-#
-# Base is python:3.11-slim (glibc), NOT Alpine/musl: manylinux wheels are
-# glibc-only, so musl would force a slow source build (plan §7, §10.8).
+# Base is python:3.11-slim (glibc) — manylinux wheels need glibc, not musl.
 
 FROM python:3.11-slim
 
-# CT2 CPU threading: match the 2-core Pi (plan §9). app.py reads these too.
 ENV OMP_NUM_THREADS=2 \
     CT2_INTER_THREADS=1 \
     CT2_INTRA_THREADS=2 \
-    CT2_MODEL_DIR=/app/model_cache_ct2 \
-    TOKENIZER_DIR=/app/tokenizer \
+    CT2_MODEL_DIR=/app/model_cache_compact_ct2 \
+    TOKENIZER_DIR=/app/model_cache_compact_ct2 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# git is needed only to pip-install IndicTransToolkit (not on PyPI). Install it,
-# use it, then drop it to keep the image small.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Dependencies first (their own layer) so code/model changes don't re-install.
 COPY requirements/docker.txt ./requirements-docker.txt
-RUN pip install --no-cache-dir -r requirements-docker.txt \
-    && apt-get purge -y git && apt-get autoremove -y
+RUN pip install --no-cache-dir -r requirements-docker.txt
 
-# The it2edge package. Serving only imports it2edge.serve.app + .paths +
-# .tokenizer_utils; the train/convert modules are tiny .py files and are never
-# imported at runtime, so shipping the whole package keeps things simple.
 COPY it2edge/ /app/it2edge/
 
-# Model + tokenizer LAST (largest, most-changed layers -> best cache reuse, §7).
-# model_cache_ct2/ = int8 CT2 weights (from it2edge.convert.convert_ct2).
-# tokenizer/       = the IndicTrans2 tokenizer files. deploy/build_arm64.sh stages
-#                    model_cache/indictrans2-en-indic-dist-200M/ -> tokenizer/.
-COPY model_cache_ct2/ /app/model_cache_ct2/
-COPY tokenizer/ /app/tokenizer/
+# Marian CT2 package includes tokenizer files (copied by convert_ct2).
+COPY model_cache_compact_ct2/ /app/model_cache_compact_ct2/
 
 EXPOSE 8080
 
-# Report healthy only once app.py has the model warm (/health returns 503 until).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
-# Single worker: on 2 GB each extra worker duplicates the model -> OOM (plan §8).
-# WORKDIR /app is on sys.path, so uvicorn can import the it2edge package.
 CMD ["uvicorn", "it2edge.serve.app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

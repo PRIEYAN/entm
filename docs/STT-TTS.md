@@ -2,7 +2,7 @@
 
 End-to-end spoken translation. You speak English into the **GPU laptop**; it
 transcribes to text (STT), sends the text to the **Raspberry Pi 3 B+** over the
-network; the Pi translates English→Hindi (the IndicTrans2 int8 model already
+network; the Pi translates English→Hindi (the MarianMT int8 model already
 running there) and speaks the Hindi aloud through a speaker wired to the Pi (TTS).
 
 ```
@@ -13,7 +13,7 @@ running there) and speaks the Hindi aloud through a speaker wired to the Pi (TTS
    │
    │  HTTP POST (or SSH) over the ethernet link
    ▼
-[Raspberry Pi 3 B+]  IndicTrans2 int8  ──►  Hindi text
+[Raspberry Pi 3 B+]  MarianMT int8  ──►  Hindi text
    │
    ▼
 [Raspberry Pi 3 B+]  Piper TTS  ──►  Hindi .wav

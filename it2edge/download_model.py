@@ -1,46 +1,91 @@
-"""Download the IndicTrans2 en-indic distilled 200M model to a local folder.
+"""Download the English→Hindi MarianMT model to a local folder.
 
-Run this ONCE (with internet). It snapshots the model repo into ./model_cache
-so the translators can run fully offline afterwards.
+Run once (with internet). Snapshots the pinned Hugging Face revision into
+./model_cache_compact and writes provenance.json for reproducibility.
 
     python -m it2edge.download_model
-
-IMPORTANT: we use snapshot_download (a raw file copy of the HF repo), NOT
-tokenizer.save_pretrained(). save_pretrained re-serialises the tokenizer's
-constructor args (src_vocab_file / tgt_vocab_file) into tokenizer_config.json;
-on reload the model's remote tokenizer then receives those paths BOTH
-positionally and as keywords, raising:
-    TypeError: __init__() got multiple values for keyword argument 'src_vocab_file'
-A raw snapshot keeps the repo's original config untouched and avoids that.
-
-If IndicTransToolkit is missing, install it first (not on PyPI):
-
-    pip install -r requirements/dev.txt
-    pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
+    python -m it2edge.download_model --control   # official OPUS baseline
+    python -m it2edge.download_model --all
 """
+
+import argparse
+import json
+from datetime import datetime, timezone
 
 from huggingface_hub import snapshot_download
 
-from it2edge.paths import HF_SNAPSHOT, MODEL_ID
+from it2edge.paths import (
+    CONTROL_MODEL_ID,
+    CONTROL_REVISION,
+    CONTROL_SNAPSHOT,
+    HF_SNAPSHOT,
+    MODEL_CACHE,
+    MODEL_ID,
+    MODEL_REVISION,
+    PROJECT_ROOT,
+)
 
-LOCAL_DIR = str(HF_SNAPSHOT)
+_TARGETS = {
+    MODEL_ID: (
+        MODEL_REVISION,
+        HF_SNAPSHOT,
+        "Samanantar-fine-tuned MarianMT en→hi (~77M). Apache-2.0.",
+    ),
+    CONTROL_MODEL_ID: (
+        CONTROL_REVISION,
+        CONTROL_SNAPSHOT,
+        "Official OPUS MarianMT en→hi control (~77M). Apache-2.0.",
+    ),
+}
+
+
+def _download_one(repo_id: str) -> None:
+    revision, local_dir, note = _TARGETS[repo_id]
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Downloading {repo_id}@{revision[:12]} -> {local_dir} ...")
+    snapshot_download(repo_id=repo_id, revision=revision, local_dir=str(local_dir))
+
+    provenance = {
+        "repo_id": repo_id,
+        "revision": revision,
+        "note": note,
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+        "source": "huggingface_hub.snapshot_download",
+    }
+    (local_dir / "provenance.json").write_text(
+        json.dumps(provenance, indent=2), encoding="utf-8"
+    )
+    rel = local_dir.relative_to(PROJECT_ROOT)
+    print(f"Done. Snapshot + provenance.json saved to {rel}")
 
 
 def main() -> None:
-    HF_SNAPSHOT.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading {MODEL_ID} into {LOCAL_DIR} ...")
-
-    # Raw snapshot of the repo: weights, config, remote code, vocab/spm files.
-    # A snapshot writes real files into local_dir (safe to copy to another
-    # machine) without going through save_pretrained, so the repo's original
-    # tokenizer_config.json is preserved as-is.
-    snapshot_download(
-        repo_id=MODEL_ID,
-        local_dir=LOCAL_DIR,
+    parser = argparse.ArgumentParser(
+        description="Download the MarianMT en→hi model(s), revision-pinned"
     )
+    parser.add_argument(
+        "--control",
+        action="store_true",
+        help="download the official OPUS control instead of the primary model",
+    )
+    parser.add_argument(
+        "--all", action="store_true", help="download both primary and control"
+    )
+    args = parser.parse_args()
 
-    print(f"Done. Model snapshot saved to {LOCAL_DIR}")
-    print("You can now run `python -m it2edge.serve.translate` fully offline.")
+    MODEL_CACHE.mkdir(parents=True, exist_ok=True)
+
+    if args.all:
+        _download_one(MODEL_ID)
+        _download_one(CONTROL_MODEL_ID)
+    elif args.control:
+        _download_one(CONTROL_MODEL_ID)
+    else:
+        _download_one(MODEL_ID)
+
+    print("\nNext: fine-tune with")
+    print("      python -m it2edge.train.finetune_marian --data_dir en-indic-exp")
 
 
 if __name__ == "__main__":

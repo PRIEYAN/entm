@@ -1,5 +1,10 @@
 # Plan — Fine-tune, compress, and deploy IndicTrans2 (dist-200M) to a low-power ARM device
 
+> **ARCHIVED.** This document describes an earlier IndicTrans2-based design.
+> The production stack now uses **MarianMT** (`AI4INDIANS/better-opus-mt-en-hi`)
+> only — see [`compact-model.md`](compact-model.md) and the root [`README.md`](../README.md).
+> Do not follow the commands below for new work.
+
 > Goal: take `ai4bharat/indictrans2-en-indic-dist-200M`, **fine-tune it (QLoRA)**,
 > squeeze it as small/fast as possible (**int8**, optional **structured pruning**),
 > package it into a **Podman** container image, ship that to a **Raspberry-Pi-class

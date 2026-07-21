@@ -1,5 +1,8 @@
 # Reducing 200M → 5M: will it cut latency, and how?
 
+> **ARCHIVED.** Written for the former IndicTrans2 200M stack. The project now
+> ships MarianMT (~77M en→hi) instead — see [`compact-model.md`](compact-model.md).
+
 > Question: the model (`ai4bharat/indictrans2-en-indic-dist-200M`) takes ~35–45 s
 > per output on a Raspberry Pi 3 B+. It's already fine-tuned, merged, int8-quantized
 > (see `model_cache_ct2/model.bin`, 213 MB). Can I drop it from **200M → 5M**

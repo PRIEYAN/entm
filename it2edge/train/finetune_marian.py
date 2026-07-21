@@ -1,36 +1,29 @@
-"""Fine-tune the compact en->hi MarianMT model on the project corpus.
+"""Fine-tune MarianMT en→hi (AI4INDIANS/better-opus-mt-en-hi) on the project corpus.
 
-RUN ON THE DEV MACHINE. Designed to fit a 4 GB GPU: full fine-tune (not LoRA)
-of the ~77M model, with fp16, per-device batch 1, gradient accumulation,
-gradient checkpointing, and short sequence caps. Only the 77M model is loaded,
-so this is far lighter than IndicTrans2 QLoRA or online distillation.
+Designed for a 4 GB GPU: full fine-tune with fp16, batch 1, gradient accumulation,
+gradient checkpointing, and short sequence caps.
 
-    python -m it2edge.download_compact_model                     # get the base first
-    python -m it2edge.train.finetune_compact_marian --data_dir en-indic-exp
+    python -m it2edge.download_model
+    python -m it2edge.train.finetune_marian --data_dir en-indic-exp
 
-Data layout (RAW line-aligned parallel text -- Marian consumes raw text, there
-is NO IndicProcessor tagging here, unlike the IndicTrans2 path):
+Data layout (raw line-aligned parallel text):
 
     en-indic-exp/
       train/eng_Latn-hin_Deva/train.eng_Latn   train.hin_Deva
       dev/eng_Latn-hin_Deva/dev.eng_Latn       dev.hin_Deva
 
-The best checkpoint (by validation chrF++) is saved to model_cache_compact_ft/.
-Convert it next with `python -m it2edge.convert.convert_compact_ct2`.
+Best checkpoint (by validation chrF++) → model_cache_compact_ft/
+Then: python -m it2edge.convert.convert_ct2
 """
 
 import argparse
 import os
 
-from it2edge.paths import COMPACT_CACHE, COMPACT_FINETUNED
-from it2edge.train.finetune_qlora import discover_pairs, read_lines
-
-SRC_LANG = "eng_Latn"
-BASE_SUBDIR = "better-opus-mt-en-hi"
+from it2edge.corpus_utils import SRC_LANG, discover_pairs, read_lines
+from it2edge.paths import FINETUNED_DIR, HF_SNAPSHOT
 
 
 def load_raw_pairs(split_dir: str):
-    """Return {'src': [...], 'tgt': [...]} of RAW line-aligned text pairs."""
     srcs, tgts = [], []
     for src_file, tgt_file, _tgt_lang in discover_pairs(split_dir):
         src_lines = read_lines(src_file)
@@ -53,17 +46,17 @@ def load_raw_pairs(split_dir: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fine-tune compact en->hi MarianMT on the project corpus (4GB-GPU safe)"
+        description="Fine-tune MarianMT en→hi on the project corpus (4GB-GPU safe)"
     )
     parser.add_argument(
         "--data_dir", required=True, help="corpus root containing train/ and dev/"
     )
     parser.add_argument(
         "--base_model",
-        default=str(COMPACT_CACHE / BASE_SUBDIR),
+        default=str(HF_SNAPSHOT),
         help="path/id of the base Marian model (default: downloaded snapshot)",
     )
-    parser.add_argument("--output_dir", default=str(COMPACT_FINETUNED))
+    parser.add_argument("--output_dir", default=str(FINETUNED_DIR))
     parser.add_argument("--epochs", type=float, default=3.0)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--grad_accum", type=int, default=16)
@@ -92,12 +85,17 @@ def main() -> None:
     )
 
     base = args.base_model
-    if not os.path.isdir(base) and os.sep not in base:
+    if not os.path.isdir(base) and (os.sep in base or (os.altsep and os.altsep in base)):
+        raise SystemExit(
+            f"Base model not found at {base}. Run "
+            "`python -m it2edge.download_model` first, or pass --base_model."
+        )
+    elif not os.path.isdir(base) and "/" not in base and "\\" not in base:
         pass  # allow a bare hub id
     elif not os.path.isdir(base):
         raise SystemExit(
             f"Base model not found at {base}. Run "
-            "`python -m it2edge.download_compact_model` first, or pass --base_model."
+            "`python -m it2edge.download_model` first, or pass --base_model."
         )
 
     cuda = torch.cuda.is_available()
@@ -109,7 +107,6 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(base)
     model = AutoModelForSeq2SeqLM.from_pretrained(base)
-    # Gradient checkpointing trades compute for memory -- key to fitting 4 GB.
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
@@ -159,10 +156,16 @@ def main() -> None:
         decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
         chrf = sacrebleu.corpus_chrf(
-            decoded_preds, [decoded_labels], word_order=2  # chrF++
+            decoded_preds, [decoded_labels], word_order=2
         ).score
         bleu = sacrebleu.corpus_bleu(decoded_preds, [decoded_labels]).score
         return {"chrf": chrf, "bleu": bleu}
+
+    # Prefer warmup_steps over deprecated warmup_ratio when possible.
+    steps_per_epoch = max(
+        1, (len(train_ds) // max(1, args.batch_size * args.grad_accum))
+    )
+    warmup_steps = max(1, int(args.warmup_ratio * args.epochs * steps_per_epoch))
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
@@ -171,7 +174,7 @@ def main() -> None:
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
         optim="adamw_torch",
         weight_decay=0.01,
@@ -189,8 +192,6 @@ def main() -> None:
         report_to="none",
     )
 
-    # transformers >=4.46 renamed the Trainer's `tokenizer=` arg to
-    # `processing_class=` (the old name is removed in the v5 line).
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -202,15 +203,14 @@ def main() -> None:
         callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
     )
 
-    print("[info] starting compact Marian fine-tune ...")
+    print("[info] starting Marian fine-tune ...")
     trainer.train()
 
-    # Save the best model (loaded at end) + tokenizer as a full HF model dir.
     model.config.use_cache = True
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     print(f"\n[ok] fine-tuned model saved to: {args.output_dir}")
-    print("     Next: python -m it2edge.convert.convert_compact_ct2")
+    print("     Next: python -m it2edge.convert.convert_ct2")
 
 
 if __name__ == "__main__":

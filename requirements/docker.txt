@@ -1,25 +1,11 @@
-# Pinned deps for the arm64 serving image (Containerfile). Plan §7.
-#
-# ALL of these ship prebuilt aarch64 (manylinux, glibc) wheels, so nothing
-# compiles -- even under QEMU cross-build. Pin every version: an unpinned dep
-# that lacks an arm64 wheel silently triggers a slow QEMU source build. Never
-# use --no-binary here. Needs pip >= 20.3 (python:3.11-slim satisfies it).
-#
-# NO torch: the CT2 runtime replaces PyTorch for inference (the whole point on a
-# 2 GB Pi). transformers is pulled in only for the tokenizer, not a model load.
+# Pinned deps for the arm64 serving image (Containerfile).
+# All must ship prebuilt aarch64 wheels. No torch. No IndicTransToolkit.
 
-# int8 CPU inference runtime (aarch64 wheels: 4.8.x per plan §3).
-# Match the version used to CONVERT the model (dev box) so runtime == converter.
 ctranslate2==4.8.1
-# tokenizer only; pinned to the IndicTransToolkit-validated window (see dev.txt).
 transformers==4.52.4
 sentencepiece==0.2.0
 sacremoses==0.1.1
 protobuf==5.29.5
 numpy==2.2.6
-# serving
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
-# IndicProcessor pre/post-processing (not on PyPI). Pin to a commit for
-# reproducible builds if you need it; the default branch works for now.
-IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git

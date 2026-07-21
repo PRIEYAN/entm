@@ -4,17 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "it2edge"
-version = "0.1.0"
-description = "Fine-tune, compress, and deploy IndicTrans2 (en-indic dist-200M) to a low-power ARM device"
+version = "0.2.0"
+description = "Fine-tune, compress, and deploy MarianMT English→Hindi to a low-power ARM device"
 readme = "README.md"
 requires-python = ">=3.11"
 
-# Runtime deps for the light CTranslate2 serving path (the Pi target). The heavy
-# training/conversion tooling (torch, peft, bitsandbytes, optimum, torch-pruning)
-# is intentionally NOT here -- install it on the dev box from requirements/dev.txt.
+# Runtime deps for CTranslate2 serving (Pi / local). Heavy training tooling
+# (torch, datasets, …) lives in requirements/dev.txt.
 dependencies = [
     "ctranslate2",
-    "transformers>=4.51,<4.53",
+    "transformers",
     "sentencepiece",
     "sacremoses",
     "protobuf",
@@ -23,42 +22,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Dev box: fine-tune + convert. Mirrors requirements/dev.txt.
 dev = [
     "torch",
-    "peft",
-    "bitsandbytes",
     "datasets",
     "accelerate",
     "evaluate",
     "sacrebleu",
     "huggingface_hub",
+    "psutil",
 ]
 
-# Optional / alternative-path extras.
-onnx = ["optimum[exporters]", "onnx", "onnxruntime"]
-prune = ["torch-pruning"]
-
-# Console scripts (available after `pip install -e .`). Each mirrors a
-# `python -m it2edge.<...>` entry point.
 [project.scripts]
 it2-download = "it2edge.download_model:main"
-it2-translate = "it2edge.serve.translate:main"
-it2-translate-ct2 = "it2edge.serve.translate_ct2:main"
-it2-finetune = "it2edge.train.finetune_qlora:main"
-it2-merge = "it2edge.train.merge_lora:main"
-it2-prune = "it2edge.train.prune_structured:main"
+it2-finetune = "it2edge.train.finetune_marian:main"
 it2-convert-ct2 = "it2edge.convert.convert_ct2:main"
-it2-export-onnx = "it2edge.convert.export_onnx:main"
-# Compact en->hi Marian path (docs/compact-model.md).
-it2-download-compact = "it2edge.download_compact_model:main"
-it2-finetune-compact = "it2edge.train.finetune_compact_marian:main"
-it2-convert-compact-ct2 = "it2edge.convert.convert_compact_ct2:main"
+it2-translate-ct2 = "it2edge.serve.translate_ct2:main"
 it2-benchmark = "it2edge.evaluate.benchmark_models:main"
+it2-ab-compare = "it2edge.evaluate.ab_compare_models:main"
+it2-prepare-data = "it2edge.train.prepare_data:main"
 
 [tool.setuptools.packages.find]
 include = ["it2edge*"]
-
-# IndicTransToolkit (IndicProcessor) is not on PyPI, so it can't be a normal
-# dependency. Install it separately in every environment:
-#   pip install git+https://github.com/VarunGumma/IndicTransToolkit.git

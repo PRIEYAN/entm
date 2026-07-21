@@ -1,32 +1,10 @@
-"""Benchmark harness for the compact en->hi migration (docs/compact-model.md).
+"""Benchmark harness for MarianMT en→hi (quality on DEV, latency on Pi).
 
-Two modes, matching the plan's release gates:
-
-  quality  (DEV MACHINE)  BLEU + chrF++ + output-safety counts over the held-out
-                          dev set, plus a deterministic sample dump for human
-                          review. Run for each candidate AND the IndicTrans2
-                          reference so scores are comparable on the SAME data.
-
-  latency  (RASPBERRY PI) warm median/p95 latency, peak RSS, model-load time and
-                          on-disk artifact size. Run for the Marian candidates
-                          only; IndicTrans2 is not a Pi runtime target.
-
-Examples:
-    # DEV: quality of the fine-tuned Marian CT2 model
     python -m it2edge.evaluate.benchmark_models quality \
-        --model_type marian --ct2_dir model_cache_compact_ct2 \
-        --data_dir en-indic-exp --out report_marian_ft.json
+        --ct2_dir model_cache_compact_ct2 --data_dir en-indic-exp --out report.json
 
-    # DEV: quality of the IndicTrans2 reference (same dev set)
-    python -m it2edge.evaluate.benchmark_models quality \
-        --model_type indictrans --ct2_dir model_cache_ct2 \
-        --tokenizer_dir model_cache/indictrans2-en-indic-dist-200M \
-        --data_dir en-indic-exp --out report_indictrans.json
-
-    # PI: latency of the Marian CT2 model
     python -m it2edge.evaluate.benchmark_models latency \
-        --model_type marian --ct2_dir model_cache_compact_ct2 \
-        --data_dir en-indic-exp --out pi_latency_marian.json
+        --ct2_dir model_cache_compact_ct2 --data_dir en-indic-exp --intra 4
 """
 
 import argparse
@@ -44,7 +22,6 @@ _LATIN = re.compile(r"[A-Za-z]")
 
 
 def _dev_pairs(data_dir: str):
-    """Load the held-out dev pairs (raw English + reference Hindi)."""
     base = os.path.join(data_dir, "dev", f"{SRC_LANG}-{TGT_LANG}")
     src_path = os.path.join(base, f"dev.{SRC_LANG}")
     ref_path = os.path.join(base, f"dev.{TGT_LANG}")
@@ -59,48 +36,15 @@ def _dev_pairs(data_dir: str):
     return srcs, refs
 
 
-def _load_model(model_type: str, ct2_dir: str, tokenizer_dir: str | None,
-                inter: int, intra: int):
-    """Return a translate_fn(list[str]) -> list[str] and a load-seconds float."""
+def _load_model(ct2_dir: str, tokenizer_dir: str | None, inter: int, intra: int):
+    from it2edge.serve.marian_ct2 import load_marian, translate_marian
+
     t0 = time.perf_counter()
-    if model_type == "marian":
-        from it2edge.serve.marian_ct2 import load_marian, translate_marian
+    tokenizer, translator = load_marian(ct2_dir, tokenizer_dir, inter, intra)
+    load_s = time.perf_counter() - t0
 
-        tokenizer, translator = load_marian(ct2_dir, tokenizer_dir, inter, intra)
-        load_s = time.perf_counter() - t0
-
-        def translate_fn(batch, beam_size=1):
-            return translate_marian(batch, tokenizer, translator, beam_size=beam_size)
-
-    elif model_type == "indictrans":
-        import ctranslate2
-
-        from it2edge.serve.translate_ct2 import _require_indicprocessor
-        from it2edge.tokenizer_utils import (
-            detokenize_target,
-            load_indictrans_tokenizer,
-        )
-
-        if not tokenizer_dir:
-            raise SystemExit("--tokenizer_dir is required for model_type=indictrans")
-        tokenizer = load_indictrans_tokenizer(tokenizer_dir)
-        translator = ctranslate2.Translator(
-            ct2_dir, device="cpu", compute_type="int8",
-            inter_threads=inter, intra_threads=intra,
-        )
-        processor = _require_indicprocessor()(inference=True)
-        load_s = time.perf_counter() - t0
-
-        def translate_fn(batch, beam_size=1):
-            pre = processor.preprocess_batch(batch, src_lang=SRC_LANG, tgt_lang=TGT_LANG)
-            enc = tokenizer(pre, truncation=True, padding=False).input_ids
-            toks = [tokenizer.convert_ids_to_tokens(ids) for ids in enc]
-            res = translator.translate_batch(toks, beam_size=beam_size,
-                                             max_decoding_length=256)
-            dec = [detokenize_target(r.hypotheses[0]) for r in res]
-            return processor.postprocess_batch(dec, lang=TGT_LANG)
-    else:
-        raise SystemExit(f"unknown --model_type {model_type!r}")
+    def translate_fn(batch, beam_size=1):
+        return translate_marian(batch, tokenizer, translator, beam_size=beam_size)
 
     return translate_fn, load_s
 
@@ -111,7 +55,7 @@ def _has_repetition(text: str, n: int = 3) -> bool:
         return False
     seen = set()
     for i in range(len(toks) - n + 1):
-        gram = tuple(toks[i:i + n])
+        gram = tuple(toks[i : i + n])
         if gram in seen:
             return True
         seen.add(gram)
@@ -155,15 +99,17 @@ def run_quality(args):
 
     srcs, refs = _dev_pairs(args.data_dir)
     translate_fn, load_s = _load_model(
-        args.model_type, args.ct2_dir, args.tokenizer_dir, args.inter, args.intra
+        args.ct2_dir, args.tokenizer_dir, args.inter, args.intra
     )
-    print(f"[info] {args.model_type} loaded in {load_s:.1f}s; translating "
-          f"{len(srcs)} dev sentences (beam={args.beam_size}) ...")
+    print(
+        f"[info] Marian loaded in {load_s:.1f}s; translating "
+        f"{len(srcs)} dev sentences (beam={args.beam_size}) ..."
+    )
 
     outs = []
     bs = args.batch_size
     for i in range(0, len(srcs), bs):
-        outs.extend(translate_fn(srcs[i:i + bs], beam_size=args.beam_size))
+        outs.extend(translate_fn(srcs[i : i + bs], beam_size=args.beam_size))
         if (i // bs) % 20 == 0:
             print(f"  {i}/{len(srcs)}")
 
@@ -171,7 +117,6 @@ def run_quality(args):
     bleu = sacrebleu.corpus_bleu(outs, [refs]).score
     safety = _safety_counts(srcs, outs)
 
-    # Deterministic 100-sentence human-review sample (evenly spaced).
     step = max(1, len(srcs) // 100)
     sample = [
         {"src": srcs[i], "ref": refs[i], "hyp": outs[i]}
@@ -180,7 +125,7 @@ def run_quality(args):
 
     report = {
         "mode": "quality",
-        "model_type": args.model_type,
+        "model": "marian",
         "ct2_dir": args.ct2_dir,
         "num_sentences": len(srcs),
         "beam_size": args.beam_size,
@@ -191,8 +136,10 @@ def run_quality(args):
         "review_sample": sample,
     }
     _write(args.out, report)
-    print(f"\n[ok] BLEU={bleu:.2f}  chrF++={chrf:.2f}  "
-          f"unsafe={safety['unsafe_fraction']*100:.2f}%")
+    print(
+        f"\n[ok] BLEU={bleu:.2f}  chrF++={chrf:.2f}  "
+        f"unsafe={safety['unsafe_fraction'] * 100:.2f}%"
+    )
 
 
 def run_latency(args):
@@ -202,16 +149,14 @@ def run_latency(args):
         psutil = None
 
     srcs, _ = _dev_pairs(args.data_dir)
-    # Short/medium/long spread: sort by length, pick 50 evenly across the range.
     ordered = sorted(srcs, key=len)
     step = max(1, len(ordered) // args.num)
     sample = ordered[::step][: args.num]
 
     translate_fn, load_s = _load_model(
-        args.model_type, args.ct2_dir, args.tokenizer_dir, args.inter, args.intra
+        args.ct2_dir, args.tokenizer_dir, args.inter, args.intra
     )
 
-    # Warm-up (discard).
     for s in sample[: args.warmup]:
         translate_fn([s], beam_size=args.beam_size)
 
@@ -234,7 +179,7 @@ def run_latency(args):
 
     report = {
         "mode": "latency",
-        "model_type": args.model_type,
+        "model": "marian",
         "ct2_dir": args.ct2_dir,
         "num_sentences": len(sample),
         "warmup_discarded": args.warmup,
@@ -248,8 +193,10 @@ def run_latency(args):
         "artifact_model_bin_mb": artifact_mb,
     }
     _write(args.out, report)
-    print(f"\n[ok] median={report['median_ms']}ms  p95={report['p95_ms']}ms  "
-          f"rss={peak_rss_mb}MB  artifact={artifact_mb}MB")
+    print(
+        f"\n[ok] median={report['median_ms']}ms  p95={report['p95_ms']}ms  "
+        f"rss={peak_rss_mb}MB  artifact={artifact_mb}MB"
+    )
 
 
 def _write(path, report):
@@ -258,19 +205,28 @@ def _write(path, report):
             json.dump(report, fh, ensure_ascii=False, indent=2)
         print(f"[info] wrote {path}")
     else:
-        print(json.dumps({k: v for k, v in report.items()
-                          if k != "review_sample"}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {k: v for k, v in report.items() if k != "review_sample"},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark en->hi models (quality/latency)")
+    parser = argparse.ArgumentParser(
+        description="Benchmark MarianMT en→hi (quality/latency)"
+    )
     sub = parser.add_subparsers(dest="mode", required=True)
 
     def _common(p):
-        p.add_argument("--model_type", required=True, choices=["marian", "indictrans"])
         p.add_argument("--ct2_dir", required=True, help="CT2 int8 model directory")
-        p.add_argument("--tokenizer_dir", default=None,
-                       help="tokenizer dir (required for indictrans)")
+        p.add_argument(
+            "--tokenizer_dir",
+            default=None,
+            help="tokenizer dir (default: same as --ct2_dir)",
+        )
         p.add_argument("--data_dir", required=True, help="corpus root with dev/")
         p.add_argument("--beam_size", type=int, default=1)
         p.add_argument("--inter", type=int, default=1)

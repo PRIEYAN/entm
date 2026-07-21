@@ -1,30 +1,18 @@
 """Turn a 2-column English,<Target> CSV into the line-aligned corpus layout.
 
-The fine-tune step (finetune_qlora.py) reads RAW line-aligned parallel files:
+The Marian fine-tune reads RAW line-aligned parallel files:
 
     en-indic-exp/
       train/eng_Latn-hin_Deva/train.eng_Latn   train.hin_Deva
       dev/eng_Latn-hin_Deva/dev.eng_Latn       dev.hin_Deva
 
-This script converts a CSV like Dataset_English_Hindi.csv --
-
-    English,Hindi
-    Help!,बचाओ!
-    Jump.,उछलो.
-    ...
-
--- into exactly that layout: it reads the CSV (properly handling quoted,
-comma- and newline-containing fields), shuffles deterministically, holds out a
-small dev split, and writes the four files. Feed RAW text -- IndicProcessor does
-normalization/tagging at train time, so do NOT transliterate or clean here.
-
 Usage:
-    python -m it2edge.train.prepare_data                      # defaults below
+    python -m it2edge.train.prepare_data
     python -m it2edge.train.prepare_data --csv Dataset_English_Hindi.csv \
         --tgt_lang hin_Deva --dev_frac 0.01 --out_dir en-indic-exp
 
 Then fine-tune:
-    python -m it2edge.train.finetune_qlora --data_dir en-indic-exp
+    python -m it2edge.train.finetune_marian --data_dir en-indic-exp
 """
 
 import argparse
@@ -129,7 +117,7 @@ def main() -> None:
     print(f"\n[done] corpus ready at {out_dir}")
     print(f"       train={len(train_pairs)}  dev={len(dev_pairs)}  "
           f"(seed={args.seed})")
-    print("       Next: python -m it2edge.train.finetune_qlora "
+    print("       Next: python -m it2edge.train.finetune_marian "
           f"--data_dir {out_dir.name}")
 
 
