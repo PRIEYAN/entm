@@ -35,20 +35,23 @@ import os
 
 import ctranslate2
 
-from it2edge.paths import CT2_DIR, HF_SNAPSHOT
+from it2edge.paths import COMPACT_CT2_DIR, CT2_DIR, HF_SNAPSHOT
 from it2edge.tokenizer_utils import detokenize_target, load_indictrans_tokenizer
-
-try:
-    from IndicTransToolkit.processor import IndicProcessor
-except ImportError as exc:  # pragma: no cover - guidance for a missing dep
-    raise SystemExit(
-        "IndicTransToolkit is not installed. Install it with:\n"
-        "    pip install git+https://github.com/VarunGumma/IndicTransToolkit.git"
-    ) from exc
 
 DEFAULT_CT2_DIR = str(CT2_DIR)
 DEFAULT_TOKENIZER_DIR = str(HF_SNAPSHOT)
 SRC_LANG = "eng_Latn"
+
+
+def _require_indicprocessor():
+    try:
+        from IndicTransToolkit.processor import IndicProcessor
+    except ImportError as exc:  # pragma: no cover - guidance for a missing dep
+        raise SystemExit(
+            "IndicTransToolkit is not installed. Install it with:\n"
+            "    pip install git+https://github.com/VarunGumma/IndicTransToolkit.git"
+        ) from exc
+    return IndicProcessor
 
 
 def load(model_dir: str, tokenizer_dir: str):
@@ -68,7 +71,7 @@ def load(model_dir: str, tokenizer_dir: str):
     tokenizer = load_indictrans_tokenizer(tokenizer_dir)
     # CPU int8 runtime. intra_threads defaults to the core count; the Pi 3 has 4.
     translator = ctranslate2.Translator(model_dir, device="cpu", compute_type="int8")
-    processor = IndicProcessor(inference=True)
+    processor = _require_indicprocessor()(inference=True)
     return tokenizer, translator, processor
 
 
@@ -115,6 +118,11 @@ def main() -> None:
     )
     parser.add_argument("text", nargs="*", help="English text to translate")
     parser.add_argument(
+        "--marian",
+        action="store_true",
+        help="use the compact en->hi MarianMT CT2 model (Pi runtime) instead of IndicTrans2",
+    )
+    parser.add_argument(
         "--tgt", default="hin_Deva", help="target language code (default: hin_Deva)"
     )
     parser.add_argument(
@@ -130,6 +138,23 @@ def main() -> None:
         "--tokenizer_dir", default=DEFAULT_TOKENIZER_DIR, help="HF tokenizer directory"
     )
     args = parser.parse_args()
+
+    if args.marian:
+        from it2edge.serve.marian_ct2 import load_marian, translate_marian
+
+        model_dir = args.model_dir if args.model_dir != DEFAULT_CT2_DIR else str(
+            COMPACT_CT2_DIR
+        )
+        tokenizer, translator = load_marian(model_dir)
+        print(f"[info] loaded compact Marian CT2 int8 model (beam_size={args.beams})")
+        sentences = [" ".join(args.text)] if args.text else [
+            "Hello, how are you today?",
+            "The weather is beautiful this morning.",
+        ]
+        out = translate_marian(sentences, tokenizer, translator, beam_size=args.beams)
+        for src, dst in zip(sentences, out):
+            print(f"\nEN: {src}\n-> {dst}")
+        return
 
     tokenizer, translator, processor = load(args.model_dir, args.tokenizer_dir)
     print(f"[info] loaded CT2 int8 model (beam_size={args.beams})")

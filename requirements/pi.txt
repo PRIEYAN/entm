@@ -10,5 +10,8 @@ transformers>=4.51,<4.53
 sentencepiece
 sacremoses
 protobuf
-# IndicProcessor (pre/post-processing). Not on PyPI:
+# psutil: peak-RSS measurement in it2edge.evaluate.benchmark_models (latency mode).
+psutil
+# IndicProcessor is needed ONLY for the IndicTrans2 path (pre/post-processing).
+# The compact Marian path (MODEL_TYPE=marian) does NOT need it. Not on PyPI:
 #   pip install git+https://github.com/VarunGumma/IndicTransToolkit.git

@@ -25,3 +25,14 @@ ONNX_DIR = PROJECT_ROOT / "onnx_model"             # export_onnx.py
 
 # Tokenizer files staged into the container image by deploy/build_arm64.sh.
 TOKENIZER_STAGE = PROJECT_ROOT / "tokenizer"
+
+# --- Compact English->Hindi Marian path (docs/compact-model.md) -------------
+# A small (~77M) bilingual MarianMT model is the on-device runtime for the 1 GB
+# Raspberry Pi, where IndicTrans2's latency is unacceptable. IndicTrans2 stays
+# only as an off-device quality reference. These dirs are all git-ignored.
+COMPACT_MODEL_ID = "AI4INDIANS/better-opus-mt-en-hi"       # fine-tuned Samanantar base
+COMPACT_CONTROL_ID = "Helsinki-NLP/opus-mt-en-hi"          # official OPUS control
+
+COMPACT_CACHE = PROJECT_ROOT / "model_cache_compact"       # downloaded HF snapshot (base)
+COMPACT_FINETUNED = PROJECT_ROOT / "model_cache_compact_ft"  # project-fine-tuned HF model
+COMPACT_CT2_DIR = PROJECT_ROOT / "model_cache_compact_ct2"  # CT2 int8 (deployable, Pi)

@@ -40,18 +40,13 @@ import ctranslate2
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from it2edge.paths import CT2_DIR, HF_SNAPSHOT, TOKENIZER_STAGE
+from it2edge.paths import COMPACT_CT2_DIR, CT2_DIR, HF_SNAPSHOT, TOKENIZER_STAGE
 from it2edge.tokenizer_utils import detokenize_target, load_indictrans_tokenizer
 
-try:
-    from IndicTransToolkit.processor import IndicProcessor
-except ImportError as exc:  # pragma: no cover - guidance for a missing dep
-    raise SystemExit(
-        "IndicTransToolkit is not installed. Install it with:\n"
-        "    pip install git+https://github.com/VarunGumma/IndicTransToolkit.git"
-    ) from exc
-
 SRC_LANG = "eng_Latn"
+
+# "indictrans" (default, legacy 200M) or "marian" (compact en->hi Pi runtime).
+MODEL_TYPE = os.environ.get("MODEL_TYPE", "indictrans").lower()
 
 
 def _env_int(name: str, default: int) -> int:
@@ -61,7 +56,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-CT2_MODEL_DIR = os.environ.get("CT2_MODEL_DIR", str(CT2_DIR))
+_default_ct2 = COMPACT_CT2_DIR if MODEL_TYPE == "marian" else CT2_DIR
+CT2_MODEL_DIR = os.environ.get("CT2_MODEL_DIR", str(_default_ct2))
 # The tokenizer dir is baked into the image at /app/tokenizer (Containerfile),
 # but fall back to the dev-machine snapshot path so local runs work unchanged.
 _tok_default = TOKENIZER_STAGE if TOKENIZER_STAGE.is_dir() else HF_SNAPSHOT
@@ -82,34 +78,52 @@ async def lifespan(_app: FastAPI):
     if not os.path.isdir(CT2_MODEL_DIR):
         raise SystemExit(
             f"CT2 model not found at {CT2_MODEL_DIR}. Build it with "
-            "`python -m it2edge.convert.convert_ct2` and bake it into the image "
-            "(deploy/Containerfile), or set CT2_MODEL_DIR."
-        )
-    if not os.path.isdir(TOKENIZER_DIR):
-        raise SystemExit(
-            f"Tokenizer not found at {TOKENIZER_DIR}. Copy the tokenizer files "
-            "into the image, or set TOKENIZER_DIR."
+            "`python -m it2edge.convert.convert_compact_ct2` (marian) or "
+            "`python -m it2edge.convert.convert_ct2` (indictrans), or set CT2_MODEL_DIR."
         )
 
     print(
-        f"[startup] loading CT2 int8 model from {CT2_MODEL_DIR} "
+        f"[startup] loading {MODEL_TYPE} CT2 int8 model from {CT2_MODEL_DIR} "
         f"(inter={INTER_THREADS}, intra={INTRA_THREADS})"
     )
-    _state["tokenizer"] = load_indictrans_tokenizer(TOKENIZER_DIR)
-    _state["translator"] = ctranslate2.Translator(
-        CT2_MODEL_DIR,
-        device="cpu",
-        compute_type="int8",
-        inter_threads=INTER_THREADS,
-        intra_threads=INTRA_THREADS,
-    )
-    _state["processor"] = IndicProcessor(inference=True)
+
+    if MODEL_TYPE == "marian":
+        # Compact en->hi Marian: tokenizer lives in the CT2 dir; no IndicProcessor.
+        from it2edge.serve.marian_ct2 import load_marian
+
+        tok_dir = TOKENIZER_DIR if os.path.isdir(TOKENIZER_DIR) else CT2_MODEL_DIR
+        _state["tokenizer"], _state["translator"] = load_marian(
+            CT2_MODEL_DIR, tok_dir, INTER_THREADS, INTRA_THREADS
+        )
+    else:
+        if not os.path.isdir(TOKENIZER_DIR):
+            raise SystemExit(
+                f"Tokenizer not found at {TOKENIZER_DIR}. Copy the tokenizer files "
+                "into the image, or set TOKENIZER_DIR."
+            )
+        from IndicTransToolkit.processor import IndicProcessor
+
+        _state["tokenizer"] = load_indictrans_tokenizer(TOKENIZER_DIR)
+        _state["translator"] = ctranslate2.Translator(
+            CT2_MODEL_DIR,
+            device="cpu",
+            compute_type="int8",
+            inter_threads=INTER_THREADS,
+            intra_threads=INTRA_THREADS,
+        )
+        _state["processor"] = IndicProcessor(inference=True)
+
     print("[startup] model warm; ready to serve.")
     yield
     _state.clear()
 
 
-app = FastAPI(title="IndicTrans2 en-indic (CTranslate2 int8)", lifespan=lifespan)
+_title = (
+    "Compact en-hi Marian (CTranslate2 int8)"
+    if MODEL_TYPE == "marian"
+    else "IndicTrans2 en-indic (CTranslate2 int8)"
+)
+app = FastAPI(title=_title, lifespan=lifespan)
 
 
 class TranslateRequest(BaseModel):
@@ -128,6 +142,14 @@ class TranslateResponse(BaseModel):
 
 def _translate(sentences: List[str], tgt_lang: str, beam_size: int,
                max_decoding_length: int) -> List[str]:
+    if MODEL_TYPE == "marian":
+        from it2edge.serve.marian_ct2 import translate_marian
+
+        return translate_marian(
+            sentences, _state["tokenizer"], _state["translator"],
+            beam_size=beam_size, max_decoding_length=max_decoding_length,
+        )
+
     tokenizer = _state["tokenizer"]
     translator = _state["translator"]
     processor = _state["processor"]

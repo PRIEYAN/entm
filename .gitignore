@@ -12,3 +12,10 @@ model_cache_pruned/
 onnx_model/
 # tokenizer/ is staged into the image by build_arm64.sh from the snapshot
 tokenizer/
+# compact en->hi Marian artifacts — regenerate from the pipeline, don't commit
+model_cache_compact/
+model_cache_compact_ft/
+model_cache_compact_ct2/
+# benchmark reports
+report_*.json
+pi_latency_*.json

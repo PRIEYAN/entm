@@ -21,6 +21,8 @@ datasets
 accelerate
 evaluate
 sacrebleu
+# psutil: peak-RSS measurement in it2edge.evaluate.benchmark_models (latency mode).
+psutil
 
 # --- optional / alternative paths ---
 # torch-pruning        # it2edge.train.prune_structured (structured pruning)

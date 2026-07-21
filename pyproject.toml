@@ -50,6 +50,11 @@ it2-merge = "it2edge.train.merge_lora:main"
 it2-prune = "it2edge.train.prune_structured:main"
 it2-convert-ct2 = "it2edge.convert.convert_ct2:main"
 it2-export-onnx = "it2edge.convert.export_onnx:main"
+# Compact en->hi Marian path (docs/compact-model.md).
+it2-download-compact = "it2edge.download_compact_model:main"
+it2-finetune-compact = "it2edge.train.finetune_compact_marian:main"
+it2-convert-compact-ct2 = "it2edge.convert.convert_compact_ct2:main"
+it2-benchmark = "it2edge.evaluate.benchmark_models:main"
 
 [tool.setuptools.packages.find]
 include = ["it2edge*"]
