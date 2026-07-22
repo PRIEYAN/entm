@@ -1,17 +1,25 @@
 # systemd Quadlet unit for the MarianMT en→hi service on the Pi.
 #
 # Install (rootless, as the Pi user):
-#   1. Replace <registry> below with your registry/user.
-#   2. mkdir -p ~/.config/containers/systemd
-#   3. cp deploy/it2.container ~/.config/containers/systemd/it2.container
-#   4. loginctl enable-linger $USER
-#   5. systemctl --user daemon-reload && systemctl --user start it2
+#   1. mkdir -p ~/.config/containers/systemd
+#   2. cp deploy/it2.container ~/.config/containers/systemd/it2.container
+#   3. loginctl enable-linger $USER
+#   4. systemctl --user daemon-reload && systemctl --user start it2
+#
+# Image= defaults to localhost/it2-ct2:latest, which is what
+# `bash deploy/build_on_pi.sh` produces when you build natively on the Pi.
+# If you cross-built and pushed with deploy/build_arm64.sh instead, change
+# Image= to <your-registry>/it2-ct2:latest.
+#
+# Thread settings below are sized for a 2-core budget. On a 4-core Pi 4/5 use
+# CT2_INTRA_THREADS=4, OMP_NUM_THREADS=4 and PodmanArgs=--cpus 4 --memory 1500m
+# — keep --cpus >= inter_threads * intra_threads or the extra threads contend.
 
 [Unit]
 Description=MarianMT en-hi translator (CTranslate2 int8)
 
 [Container]
-Image=<registry>/it2-ct2:latest
+Image=localhost/it2-ct2:latest
 PublishPort=8080:8080
 Environment=OMP_NUM_THREADS=2
 Environment=CT2_INTER_THREADS=1

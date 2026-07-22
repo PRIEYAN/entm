@@ -8,6 +8,11 @@ Standard CTranslate2 Marian recipe:
                               skip_special_tokens=True)
 """
 
+# `from __future__ import annotations` keeps the `str | None` hints below from
+# being evaluated at import time, so this module also imports on Python 3.9
+# (some Raspberry Pi OS images still ship 3.9).
+from __future__ import annotations
+
 import os
 
 import ctranslate2

@@ -24,6 +24,13 @@ if [ ! -d model_cache_compact_ct2 ]; then
   exit 1
 fi
 
+if ! command -v podman >/dev/null 2>&1; then
+  echo "error: podman not found. This cross-build path uses podman manifests." >&2
+  echo "       Either install podman, or build natively on the Pi instead:" >&2
+  echo "         bash deploy/push_to_pi.sh pi@<ip> && ssh pi@<ip> 'cd entm && bash deploy/build_on_pi.sh'" >&2
+  exit 1
+fi
+
 echo "[info] ensuring QEMU arm64 emulation is registered ..."
 podman run --rm --privileged docker.io/tonistiigi/binfmt --install arm64 >/dev/null
 

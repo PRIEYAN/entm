@@ -7,6 +7,8 @@
         --ct2_dir model_cache_compact_ct2 --data_dir en-indic-exp --intra 4
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -142,6 +144,49 @@ def run_quality(args):
     )
 
 
+def _host_info():
+    """Board/arch context so a laptop report and a Pi report are distinguishable.
+
+    On a Raspberry Pi this also records temperature and the throttling flags:
+    `throttled` other than 0x0 means the board was throttling and the latency
+    numbers from that run are pessimistic.
+    """
+    import platform
+    import subprocess
+
+    info = {
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+        "cpu_count": os.cpu_count(),
+    }
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("Model"):
+                    info["board"] = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", encoding="utf-8") as fh:
+            info["temp_c"] = round(int(fh.read().strip()) / 1000.0, 1)
+    except (OSError, ValueError):
+        pass
+    for key, cmd in (
+        ("throttled", ["vcgencmd", "get_throttled"]),
+        ("vc_temp", ["vcgencmd", "measure_temp"]),
+    ):
+        try:
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=5, check=False
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                info[key] = out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return info
+
+
 def run_latency(args):
     try:
         import psutil
@@ -153,42 +198,68 @@ def run_latency(args):
     step = max(1, len(ordered) // args.num)
     sample = ordered[::step][: args.num]
 
+    # Memory before the model is loaded, so the report can separate the
+    # interpreter+library baseline from the model's own footprint. On x86 the
+    # ctranslate2 wheel bundles MKL/oneDNN kernels that reserve several hundred
+    # MB at import; the aarch64 wheel does not, so this split is what makes a
+    # laptop run and a Pi run comparable.
+    baseline_rss_mb = None
+    if psutil is not None:
+        baseline_rss_mb = round(psutil.Process().memory_info().rss / 1e6, 1)
+
     translate_fn, load_s = _load_model(
         args.ct2_dir, args.tokenizer_dir, args.inter, args.intra
     )
 
+    loaded_rss_mb = None
+    if psutil is not None:
+        loaded_rss_mb = round(psutil.Process().memory_info().rss / 1e6, 1)
+
     for s in sample[: args.warmup]:
         translate_fn([s], beam_size=args.beam_size)
 
+    # Sample RSS as we go: a single reading at the end misses the true peak,
+    # which on a memory-tight board is the number that decides OOM.
     lat = []
+    peak_rss_mb = loaded_rss_mb
     for s in sample:
         t0 = time.perf_counter()
         translate_fn([s], beam_size=args.beam_size)
         lat.append((time.perf_counter() - t0) * 1000.0)
+        if psutil is not None:
+            rss = round(psutil.Process().memory_info().rss / 1e6, 1)
+            if peak_rss_mb is None or rss > peak_rss_mb:
+                peak_rss_mb = rss
 
-    lat.sort()
-    p95 = lat[min(len(lat) - 1, int(round(0.95 * len(lat))) - 1)]
-    peak_rss_mb = None
-    if psutil is not None:
-        peak_rss_mb = round(psutil.Process().memory_info().rss / 1e6, 1)
+    ordered_lat = sorted(lat)
+    p95 = ordered_lat[min(len(ordered_lat) - 1, int(round(0.95 * len(ordered_lat))) - 1)]
 
     ct2_bin = os.path.join(args.ct2_dir, "model.bin")
     artifact_mb = (
         round(os.path.getsize(ct2_bin) / 1e6, 1) if os.path.isfile(ct2_bin) else None
     )
 
+    model_rss_mb = None
+    if baseline_rss_mb is not None and loaded_rss_mb is not None:
+        model_rss_mb = round(loaded_rss_mb - baseline_rss_mb, 1)
+
     report = {
         "mode": "latency",
         "model": "marian",
         "ct2_dir": args.ct2_dir,
+        "host": _host_info(),
+        "threads": {"inter": args.inter, "intra": args.intra},
         "num_sentences": len(sample),
         "warmup_discarded": args.warmup,
         "beam_size": args.beam_size,
-        "median_ms": round(statistics.median(lat), 1),
+        "median_ms": round(statistics.median(ordered_lat), 1),
         "p95_ms": round(p95, 1),
-        "min_ms": round(lat[0], 1),
-        "max_ms": round(lat[-1], 1),
+        "min_ms": round(ordered_lat[0], 1),
+        "max_ms": round(ordered_lat[-1], 1),
         "load_seconds": round(load_s, 2),
+        "baseline_rss_mb": baseline_rss_mb,
+        "loaded_rss_mb": loaded_rss_mb,
+        "model_rss_mb": model_rss_mb,
         "peak_rss_mb": peak_rss_mb,
         "artifact_model_bin_mb": artifact_mb,
     }
@@ -197,6 +268,12 @@ def run_latency(args):
         f"\n[ok] median={report['median_ms']}ms  p95={report['p95_ms']}ms  "
         f"rss={peak_rss_mb}MB  artifact={artifact_mb}MB"
     )
+    thr = report["host"].get("throttled")
+    if thr and thr != "throttled=0x0":
+        print(
+            f"[warn] the board reported {thr} — it was thermally throttled, so "
+            "these latencies are pessimistic. Add cooling and re-run."
+        )
 
 
 def _write(path, report):

@@ -131,6 +131,26 @@ end-to-end**. But almost all of that is one-time startup, **not** translation:
 
 Measured with CTranslate2's default `intra_threads=2` (edge-realistic), **not** all 12 cores.
 
+### Memory footprint — **measured**, and why the laptop number misleads
+
+Measured on this laptop with `it2edge.evaluate.benchmark_models latency`:
+
+| Stage | RSS |
+|---|---|
+| bare Python | ~19 MB |
+| `import ctranslate2` | **~407 MB** |
+| `+ transformers + tokenizer` | ~448 MB |
+| `+ translator loaded` | ~575 MB |
+| peak during translation | ~582 MB |
+
+> ⚠️ **That ~390 MB jump on `import ctranslate2` is x86-only.** The x86_64 wheel
+> bundles a 60.7 MB `_ext…so` with Intel MKL/oneDNN kernels that reserve large
+> thread arenas at import. The **aarch64 wheel has no MKL** — it uses the much
+> lighter Ruy/oneDNN-ARM backend. So do **not** budget 580 MB for the Pi; the
+> int8 weights themselves are only 79 MB. The benchmark now reports
+> `baseline_rss_mb` / `loaded_rss_mb` / `model_rss_mb` separately so the Pi run
+> can be compared honestly against this one. **Measure it on the board.**
+
 ### On a Raspberry Pi (1 GB RAM) — **estimated**
 
 > ⚠️ These are projections, not measured. Actual numbers depend on the exact Pi

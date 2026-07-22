@@ -1,0 +1,48 @@
+# systemd unit for the BARE-METAL (no container) lane on the Pi.
+#
+# Use this instead of deploy/it2.container on 1 GB boards (Pi 3B+, Pi Zero 2 W),
+# where the container runtime's overhead is a meaningful slice of total RAM.
+#
+# Install (as the Pi user, assuming the project is at ~/entm):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/it2-baremetal.service ~/.config/systemd/user/it2.service
+#   loginctl enable-linger $USER
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now it2
+#   systemctl --user status it2
+#
+# Logs:    journalctl --user -u it2 -f
+# Restart: systemctl --user restart it2
+#
+# If the project lives somewhere other than %h/entm, edit WorkingDirectory
+# and ExecStart below.
+
+[Unit]
+Description=MarianMT en-hi translator (CTranslate2 int8, bare metal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/entm
+
+# Thread budget. Sized for 2 cores; on a 4-core Pi 4/5 set both to 4.
+# Rule: CT2_INTER_THREADS * CT2_INTRA_THREADS <= physical cores.
+Environment=CT2_INTER_THREADS=1
+Environment=CT2_INTRA_THREADS=2
+Environment=OMP_NUM_THREADS=2
+Environment=DEFAULT_BEAM_SIZE=1
+Environment=CT2_MODEL_DIR=%h/entm/model_cache_compact_ct2
+
+# --workers 1 is deliberate: each extra worker loads its own copy of the
+# model and will OOM a 1 GB board.
+ExecStart=%h/entm/venv/bin/uvicorn it2edge.serve.app:app \
+    --host 0.0.0.0 --port 8080 --workers 1
+
+Restart=always
+RestartSec=5
+# Model load is slow on a Pi; don't let systemd give up early.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
