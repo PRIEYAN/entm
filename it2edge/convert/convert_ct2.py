@@ -23,7 +23,10 @@ _TOKENIZER_FILES = (
     "tokenizer_config.json",
     "special_tokens_map.json",
     "generation_config.json",
-    "config.json",
+    # NOTE: do NOT copy the HF model config.json here. The CT2 converter writes
+    # its own config.json into the output dir, and copying the HF Marian config
+    # over it (which contains `max_length: null` etc.) breaks
+    # ctranslate2.Translator with a JSON null type error.
 )
 
 
