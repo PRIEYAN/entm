@@ -1,0 +1,18 @@
+# Jetson Nano — full voice pipeline on ONE box.
+#   Whisper STT (GPU) + MarianMT translation (GPU): CTranslate2 CUDA runtime
+#   Piper TTS (CPU): external binary (see docs/STT-TTS.md Part 3), not a pip dep
+#
+# The model-critical pins come from requirements/pi.txt (same int8 CT2 model).
+# The Whisper + mic stack is added here.
+#
+# ⚠️ GPU note: the plain PyPI `ctranslate2` wheel is CPU-only. To run STT AND
+# translation on the Jetson GPU you need a CUDA-enabled CT2 build for the Nano
+# (CUDA 10.2 / sm_53) — install it from an NVIDIA l4t container or a source
+# build (see nvidia/NvidiaRun.md + NvidiaPlan.md §3.2). If that build isn't
+# present, engine.py falls back to CPU automatically and the pipeline still runs.
+
+-r ../requirements/pi.txt
+
+faster-whisper
+sounddevice
+soundfile
