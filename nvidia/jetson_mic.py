@@ -120,8 +120,12 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="one utterance then exit")
     args = ap.parse_args()
 
+    # Only the mic loop needs Whisper. --text / --bench skip it, so they don't
+    # require faster_whisper and start much faster.
+    needs_stt = args.text is None and not args.bench
+
     engine = Engine()
-    engine.load()  # warm both GPU models + bind the CPU speaker, once
+    engine.load(with_stt=needs_stt)
 
     if args.bench:
         bench(engine, do_speak=args.speak)

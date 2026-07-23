@@ -75,10 +75,18 @@ class Engine:
 
     # ----- one-time warm load -------------------------------------------------
 
-    def load(self) -> None:
-        """Load both GPU models and bind the CPU speaker. Call once at startup."""
+    def load(self, with_stt: bool = True) -> None:
+        """Warm the models + bind the CPU speaker. Call once at startup.
+
+        with_stt=False skips Whisper entirely — text-only and text->audio modes
+        never touch the mic, so they shouldn't pay Whisper's import/load cost or
+        even require faster_whisper to be installed.
+        """
         _ensure_cuda_on_path()
-        self._load_whisper()
+        if with_stt:
+            self._load_whisper()
+        else:
+            self.whisper_device = "off"
         self._load_translator()
         self._bind_speaker()
 
