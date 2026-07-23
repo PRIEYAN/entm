@@ -12,6 +12,7 @@ lora_adapters/
 model_cache_merged/
 model_cache_pruned/
 onnx_model/
+model_onnx/
 tokenizer/
 # benchmark reports
 report_*.json

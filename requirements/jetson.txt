@@ -29,3 +29,15 @@ numpy>=1.24,<2.0               # cp38 has no numpy 2.x; CT2 4.5 + transformers <
 faster-whisper
 sounddevice
 soundfile
+
+# --- GPU translation via ONNX Runtime (TRANSLATE_BACKEND=onnx) ------------
+# CTranslate2 4.x has NO CUDA build for the Nano (sm_53 / CUDA 10.2), so the
+# translator only runs on CPU under CT2. ONNX Runtime DOES have a GPU build for
+# JetPack 4.6, so `TRANSLATE_BACKEND=onnx` runs the same model on the GPU.
+#
+# ⚠️ Do NOT rely on the PyPI `onnxruntime` wheel for GPU — it is CPU-only on
+# aarch64. Install NVIDIA's Jetson `onnxruntime-gpu` wheel for your JetPack
+# (from the Jetson Zoo / NVIDIA forums), which binds CUDAExecutionProvider.
+# The line below installs the CPU onnxruntime as a floor; replace it on the
+# Jetson with the NVIDIA GPU wheel to actually use the GPU.
+onnxruntime>=1.10

@@ -71,6 +71,7 @@ class Engine:
         self.tokenizer = None
         self.translator = None
         self.ct2_device = "?"
+        self._onnx = None  # OnnxMarian when TRANSLATE_BACKEND=onnx, else None
         self._speak = None  # it2edge.serve.speak.speak, bound lazily
 
     # ----- one-time warm load -------------------------------------------------
@@ -117,11 +118,41 @@ class Engine:
         print(f"[engine] Whisper '{name}' on CPU (int8)")
 
     def _load_translator(self) -> None:
+        # Backend choice: 'onnx' runs on the Jetson GPU (ONNX Runtime), 'ct2' uses
+        # the CPU-only CTranslate2 int8 model. Default onnx so `CT2_DEVICE=cuda`
+        # actually reaches the GPU — CT2 4.x has no CUDA build for the Nano.
+        backend = os.environ.get("TRANSLATE_BACKEND", "onnx").lower()
+        if backend == "onnx":
+            self._load_translator_onnx()
+        else:
+            self._load_translator_ct2()
+
+    def _load_translator_onnx(self) -> None:
+        from nvidia.marian_onnx import OnnxMarian
+
+        model_dir = os.environ.get("ONNX_MODEL_DIR", "model_onnx")
+        if not os.path.isdir(model_dir):
+            raise SystemExit(
+                f"ONNX model not found at {model_dir}. Export it with "
+                "`optimum-cli export onnx --model model_cache_compact_ft "
+                "--task text2text-generation-with-past model_onnx` and copy it over, "
+                "or set TRANSLATE_BACKEND=ct2 to use the CPU CTranslate2 model."
+            )
+        want = os.environ.get("CT2_DEVICE", "cuda").lower()
+        self._onnx = OnnxMarian(model_dir, device=want)
+        self.tokenizer = self._onnx.tokenizer
+        self.translator = self._onnx  # sentinel; translate() picks the ONNX path
+        self.ct2_device = self._onnx.device
+        print(f"[engine] Translator (MarianMT ONNX) on "
+              f"{'CUDA' if self._onnx.device == 'cuda' else 'CPU'}")
+
+    def _load_translator_ct2(self) -> None:
         import ctranslate2
         from transformers import AutoTokenizer
 
         from it2edge.paths import CT2_DIR
 
+        self._onnx = None
         model_dir = os.environ.get("CT2_MODEL_DIR", str(CT2_DIR))
         if not os.path.isdir(model_dir):
             raise SystemExit(
@@ -171,12 +202,15 @@ class Engine:
         return Stage(text, (time.perf_counter() - t0) * 1000.0)
 
     def translate(self, english: str) -> Stage:
-        from it2edge.serve.marian_ct2 import translate_marian
-
         t0 = time.perf_counter()
-        hindi = translate_marian(
-            [english], self.tokenizer, self.translator, beam_size=1
-        )[0]
+        if self._onnx is not None:
+            hindi = self._onnx.translate([english])[0]
+        else:
+            from it2edge.serve.marian_ct2 import translate_marian
+
+            hindi = translate_marian(
+                [english], self.tokenizer, self.translator, beam_size=1
+            )[0]
         return Stage(hindi, (time.perf_counter() - t0) * 1000.0)
 
     def speak(self, hindi: str) -> float:
