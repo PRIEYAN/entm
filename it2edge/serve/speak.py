@@ -20,6 +20,11 @@ Design notes for the 1 GB Pi:
     synthesis finishes, and nothing is written to the SD card.
 """
 
+# `tuple[bool, str]` and other PEP 585 hints below are only subscriptable at
+# runtime on Python 3.9+. The Jetson Nano runs Python 3.8, so defer hint
+# evaluation to keep this module importable there.
+from __future__ import annotations
+
 import argparse
 import json
 import os
