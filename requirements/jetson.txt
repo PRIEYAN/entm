@@ -1,0 +1,31 @@
+# Jetson Nano (JetPack 4.6 / Python 3.8 / aarch64) requirements.
+#
+# WHY THIS FILE EXISTS, separate from requirements/pi.txt:
+# The Nano is frozen at Python 3.8. Two of pi.txt's exact pins have NO cp38
+# wheel and make `pip install -r requirements/pi.txt` fail outright:
+#   * ctranslate2==4.8.1   -> newest cp38 wheel is 4.5.0
+#   * transformers==4.57.6 -> requires Python >=3.9
+# So this file FLOORS those two to the newest versions that actually resolve on
+# 3.8. CT2 4.5.0 loads the same converted int8 model; transformers <4.57 loads
+# the same MarianTokenizer (vocab 64110) — the 4.57.6 note in pi.txt is about a
+# `dtype` kwarg used during CONVERSION, not inference, so it doesn't apply here.
+
+# --- model-critical, floored to what exists on cp38 -----------------------
+ctranslate2>=4.5,<4.6          # 4.5.0 is the last cp38 wheel
+transformers>=4.36,<4.46       # 4.46+ drops Python 3.8; 4.36 loads MarianTokenizer fine
+# huggingface-hub <0.26: newer versions pull in `hf-xet`, a Rust package with no
+# cp38/aarch64 wheel that fails to build on the Nano (needs a Rust toolchain).
+# We never download from HF at runtime — the model is local — so the old, pure-
+# Python hub is all we need.
+huggingface-hub>=0.23,<0.26
+sentencepiece>=0.2.0
+
+# --- supporting -----------------------------------------------------------
+sacremoses>=0.1.1
+protobuf>=3.20
+numpy>=1.24,<2.0               # cp38 has no numpy 2.x; CT2 4.5 + transformers <4.46 want <2.0
+
+# --- STT + mic (voice-input command) --------------------------------------
+faster-whisper
+sounddevice
+soundfile

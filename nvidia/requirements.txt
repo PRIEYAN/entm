@@ -2,8 +2,14 @@
 #   Whisper STT (GPU) + MarianMT translation (GPU): CTranslate2 CUDA runtime
 #   Piper TTS (CPU): external binary (see docs/STT-TTS.md Part 3), not a pip dep
 #
-# The model-critical pins come from requirements/pi.txt (same int8 CT2 model).
-# The Whisper + mic stack is added here.
+# ON THE JETSON NANO (Python 3.8): use requirements/jetson.txt instead of this
+# file. pi.txt's exact pins (ctranslate2==4.8.1, transformers==4.57.6) have no
+# cp38 wheel and will fail to install. jetson.txt floors them to versions that
+# resolve on 3.8 and already includes faster-whisper + the mic stack:
+#
+#     pip install -r requirements/jetson.txt
+#
+# This file targets a modern Python (3.9+) box and keeps pi.txt's exact pins.
 #
 # ⚠️ GPU note: the plain PyPI `ctranslate2` wheel is CPU-only. To run STT AND
 # translation on the Jetson GPU you need a CUDA-enabled CT2 build for the Nano
