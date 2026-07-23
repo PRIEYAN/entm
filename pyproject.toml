@@ -5,20 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "it2edge"
 version = "0.2.0"
-description = "Fine-tune, compress, and deploy MarianMT English→Hindi to a low-power ARM device"
-readme = "README.md"
-requires-python = ">=3.11"
+description = "Fine-tune, compress, and deploy MarianMT English→Hindi to an NVIDIA Jetson Nano"
+requires-python = ">=3.8"
 
-# Runtime deps for CTranslate2 serving (Pi / local). Heavy training tooling
-# (torch, datasets, …) lives in requirements/dev.txt.
+# Core deps for CTranslate2 translation + tokenizer. The Jetson voice pipeline
+# pins these (floored for Python 3.8) in requirements/jetson.txt; heavy training
+# tooling (torch, datasets, …) lives in requirements/dev.txt.
 dependencies = [
     "ctranslate2",
     "transformers",
     "sentencepiece",
     "sacremoses",
     "protobuf",
-    "fastapi",
-    "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +34,6 @@ dev = [
 it2-download = "it2edge.download_model:main"
 it2-finetune = "it2edge.train.finetune_marian:main"
 it2-convert-ct2 = "it2edge.convert.convert_ct2:main"
-it2-translate-ct2 = "it2edge.serve.translate_ct2:main"
 it2-benchmark = "it2edge.evaluate.benchmark_models:main"
 it2-ab-compare = "it2edge.evaluate.ab_compare_models:main"
 it2-prepare-data = "it2edge.train.prepare_data:main"

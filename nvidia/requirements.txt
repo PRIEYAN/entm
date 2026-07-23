@@ -1,24 +1,14 @@
-# Jetson Nano — full voice pipeline on ONE box.
-#   Whisper STT (GPU) + MarianMT translation (GPU): CTranslate2 CUDA runtime
-#   Piper TTS (CPU): external binary (see docs/STT-TTS.md Part 3), not a pip dep
+# Jetson Nano full voice pipeline — deps.
 #
-# ON THE JETSON NANO (Python 3.8): use requirements/jetson.txt instead of this
-# file. pi.txt's exact pins (ctranslate2==4.8.1, transformers==4.57.6) have no
-# cp38 wheel and will fail to install. jetson.txt floors them to versions that
-# resolve on 3.8 and already includes faster-whisper + the mic stack:
+# The single source of truth for the Nano is requirements/jetson.txt (floored
+# for JetPack 4.6 / Python 3.8 / aarch64, and already includes faster-whisper,
+# the mic stack, ONNX Runtime, and the webrtcvad gate). Install that:
 #
 #     pip install -r requirements/jetson.txt
 #
-# This file targets a modern Python (3.9+) box and keeps pi.txt's exact pins.
-#
-# ⚠️ GPU note: the plain PyPI `ctranslate2` wheel is CPU-only. To run STT AND
-# translation on the Jetson GPU you need a CUDA-enabled CT2 build for the Nano
-# (CUDA 10.2 / sm_53) — install it from an NVIDIA l4t container or a source
-# build (see nvidia/NvidiaRun.md + NvidiaPlan.md §3.2). If that build isn't
-# present, engine.py falls back to CPU automatically and the pipeline still runs.
+# ⚠️ On the Jetson, replace the CPU `onnxruntime` floor in jetson.txt with
+# NVIDIA's `onnxruntime-gpu` wheel to bind CUDAExecutionProvider (see the note
+# in jetson.txt and nvidia/NvidiaRun.md). Piper TTS is an external binary, not a
+# pip dep — see docs/STT-TTS.md Part 3 / NvidiaRun.md.
 
--r ../requirements/pi.txt
-
-faster-whisper
-sounddevice
-soundfile
+-r ../requirements/jetson.txt

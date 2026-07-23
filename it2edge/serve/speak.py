@@ -74,7 +74,7 @@ def _voice_sample_rate(default="22050"):
 def speak(text: str):
     if not os.path.isfile(PIPER_BIN):
         raise SystemExit(
-            f"Piper binary not found at {PIPER_BIN}. Install it (see docs/STT-TTS.md) "
+            f"Piper binary not found at {PIPER_BIN}. Install it (see nvidia/NvidiaRun.md) "
             "or set PIPER_BIN."
         )
     if not os.path.isfile(PIPER_VOICE):

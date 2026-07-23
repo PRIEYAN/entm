@@ -1,4 +1,5 @@
-# Dev-laptop dependencies: MarianMT fine-tune + CT2 convert + benchmarks.
+# Dev-box dependencies: MarianMT fine-tune + CT2/ONNX export + benchmarks.
+# (Run on an x86/modern box, NOT the Jetson — the Jetson uses jetson.txt.)
 #
 # Install CUDA torch SEPARATELY if you have an NVIDIA GPU:
 #   pip uninstall -y torch
@@ -14,8 +15,6 @@ sacremoses
 protobuf
 huggingface_hub
 ctranslate2
-fastapi
-uvicorn[standard]
 
 # Fine-tune
 datasets
@@ -23,6 +22,11 @@ accelerate
 evaluate
 sacrebleu
 psutil
+
+# ONNX export + int8 quantization for the Jetson (jetsonNvidia.md §6)
+optimum[onnxruntime]
+onnx
+onnxruntime
 
 # torch is intentionally not pinned here — install the CUDA (or CPU) wheel
 # matching your machine first (see README).

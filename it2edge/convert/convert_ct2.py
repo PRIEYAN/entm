@@ -83,8 +83,8 @@ def main() -> None:
     _copy_tokenizer(args.model, args.output_dir)
 
     print(f"\n[ok] int8 CTranslate2 model written to: {args.output_dir}")
-    print("     Verify:")
-    print('       python -m it2edge.serve.translate_ct2 "Hello, how are you?"')
+    print("     Verify (CPU fallback backend on the Jetson):")
+    print('       TRANSLATE_BACKEND=ct2 python -m nvidia.jetson_mic --text "Hello, how are you?"')
 
 
 if __name__ == "__main__":

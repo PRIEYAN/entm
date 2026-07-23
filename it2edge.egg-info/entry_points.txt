@@ -1,8 +1,0 @@
-[console_scripts]
-it2-ab-compare = it2edge.evaluate.ab_compare_models:main
-it2-benchmark = it2edge.evaluate.benchmark_models:main
-it2-convert-ct2 = it2edge.convert.convert_ct2:main
-it2-download = it2edge.download_model:main
-it2-finetune = it2edge.train.finetune_marian:main
-it2-prepare-data = it2edge.train.prepare_data:main
-it2-translate-ct2 = it2edge.serve.translate_ct2:main

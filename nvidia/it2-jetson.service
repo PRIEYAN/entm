@@ -1,0 +1,49 @@
+# Jetson Nano voice-pipeline server (jetsonNvidia.md Phase 6).
+#
+# Runs nvidia/server.py as a long-lived service so the warm models survive
+# reboots and are ready the moment the box is up. The mic client
+# (python -m nvidia.client) connects to the socket this server creates — run the
+# client on demand, or add a second unit for it.
+#
+# Install (edit User/paths to match your board, then):
+#   sudo cp nvidia/it2-jetson.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now it2-jetson
+#   journalctl -u it2-jetson -f          # watch startup / latency logs
+#
+# ExecStartPre pins max clocks so the two GPU stages aren't throttled (the
+# numbers in jetsonNvidia.md §11 assume this). They need root; they're allowed
+# to fail (|| true) on boards where the tools differ.
+
+[Unit]
+Description=it2 Jetson EN->HI voice pipeline (warm STT+MT on GPU, Piper on CPU)
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=prieyan
+WorkingDirectory=/home/prieyan/weeb/entm
+
+# Max performance mode + pinned clocks (see jetsonNvidia.md §"Keep the clocks up").
+ExecStartPre=-/usr/bin/sudo /usr/sbin/nvpmodel -m 0
+ExecStartPre=-/usr/bin/sudo /usr/bin/jetson_clocks
+
+# CUDA libs on the loader path; both GPU models need them (engine.py also does this).
+Environment=LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu
+Environment=WHISPER_MODEL=base
+Environment=WHISPER_DEVICE=cuda
+Environment=CT2_DEVICE=cuda
+Environment=TRANSLATE_BACKEND=onnx
+Environment=ONNX_MODEL_DIR=/home/prieyan/weeb/entm/model_onnx
+Environment=IT2_SOCKET=/run/it2/it2.sock
+
+# /run/it2 for the socket, group-readable so the client user can connect.
+RuntimeDirectory=it2
+RuntimeDirectoryMode=0770
+
+ExecStart=/home/prieyan/weeb/entm/venv/bin/python -m nvidia.server --socket /run/it2/it2.sock
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

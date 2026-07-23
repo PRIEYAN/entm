@@ -1,14 +1,13 @@
 # Jetson Nano (JetPack 4.6 / Python 3.8 / aarch64) requirements.
+# The single source of truth for installing the voice pipeline ON THE NANO:
+#     pip install -r requirements/jetson.txt
 #
-# WHY THIS FILE EXISTS, separate from requirements/pi.txt:
-# The Nano is frozen at Python 3.8. Two of pi.txt's exact pins have NO cp38
-# wheel and make `pip install -r requirements/pi.txt` fail outright:
-#   * ctranslate2==4.8.1   -> newest cp38 wheel is 4.5.0
-#   * transformers==4.57.6 -> requires Python >=3.9
-# So this file FLOORS those two to the newest versions that actually resolve on
-# 3.8. CT2 4.5.0 loads the same converted int8 model; transformers <4.57 loads
-# the same MarianTokenizer (vocab 64110) — the 4.57.6 note in pi.txt is about a
-# `dtype` kwarg used during CONVERSION, not inference, so it doesn't apply here.
+# The Nano is frozen at Python 3.8, so every pin here is FLOORED to the newest
+# version that actually has a cp38/aarch64 wheel (a modern box would pin higher,
+# but those wheels don't exist for 3.8):
+#   * ctranslate2 -> 4.5.0 is the last cp38 wheel (loads the same int8 model)
+#   * transformers -> 4.46+ drops Python 3.8; <4.46 loads the same MarianTokenizer
+#     (vocab 64110). The 4.57 `dtype` kwarg only matters at CONVERSION, not here.
 
 # --- model-critical, floored to what exists on cp38 -----------------------
 ctranslate2>=4.5,<4.6          # 4.5.0 is the last cp38 wheel
@@ -29,6 +28,13 @@ numpy>=1.24,<2.0               # cp38 has no numpy 2.x; CT2 4.5 + transformers <
 faster-whisper
 sounddevice
 soundfile
+
+# --- VAD (always-listening gate for the streaming client) -----------------
+# webrtcvad is a tiny pure-C energy VAD with a cp38/aarch64 wheel — no torch,
+# so it's the DEFAULT gate for nvidia/client.py (idle-when-silent). Silero VAD
+# is more accurate but needs the Jetson torch wheel; add it only if energy VAD
+# is too noisy in your environment (nvidia/vad.py supports both backends).
+webrtcvad>=2.0.10
 
 # --- GPU translation via ONNX Runtime (TRANSLATE_BACKEND=onnx) ------------
 # CTranslate2 4.x has NO CUDA build for the Nano (sm_53 / CUDA 10.2), so the

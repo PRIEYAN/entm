@@ -201,6 +201,26 @@ class Engine:
         text = " ".join(s.text for s in segments).strip()
         return Stage(text, (time.perf_counter() - t0) * 1000.0)
 
+    def stt_segments(self, audio):
+        """Yield (english_sentence, elapsed_ms) per Whisper segment, as they decode.
+
+        This is the sentence-level lever from jetsonNvidia.md §11.3: instead of
+        waiting for the whole utterance to transcribe before anything downstream
+        runs, emit each segment the moment faster-whisper produces it. The server
+        pushes each one straight into MT->TTS, so the first Hindi line plays while
+        later lines are still being transcribed.
+
+        `audio` may be a WAV path or a float32 numpy array at 16 kHz (what the
+        socket server assembles from the streamed PCM). Times are cumulative from
+        the start of transcription so the caller can see per-segment latency.
+        """
+        t0 = time.perf_counter()
+        segments, _ = self.whisper.transcribe(audio, language="en")
+        for seg in segments:              # faster-whisper yields lazily as it decodes
+            text = seg.text.strip()
+            if text:
+                yield text, (time.perf_counter() - t0) * 1000.0
+
     def translate(self, english: str) -> Stage:
         t0 = time.perf_counter()
         if self._onnx is not None:
