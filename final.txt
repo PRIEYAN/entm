@@ -1,0 +1,188 @@
+================================================================================
+  final.txt — Getting the EN->HI voice pipeline onto the Jetson Nano GPU
+  From "Checkpoint 1" all the way to the full GPU pipeline.
+================================================================================
+
+WHO THIS IS FOR
+  You, on the Jetson Nano (nvidia@nvidia-desktop), repo at /mnt/sd/weeb/entm.
+  You just created a Python 3.6 venv (venv36) because that is the ONLY Python
+  on this board that can touch the GPU.
+
+WHY PYTHON 3.6 (the thing that caused all the pain)
+  The Jetson Nano is frozen at JetPack 4.6 / CUDA 10.2 / Python 3.6.
+    * CTranslate2 (faster-whisper's engine) needs CUDA 11+  -> no GPU here, ever.
+    * onnxruntime-gpu needs CUDA 11+                        -> no GPU here.
+    * TensorRT 8.2 IS on the board and DOES work on CUDA 10.2 -> this is our GPU path.
+      BUT its Python binding exists ONLY for Python 3.6 (tensorrt.so is cp36).
+  So: to use the GPU we MUST run on Python 3.6 + TensorRT. Modern transformers
+  dropped 3.6, so we pin an older transformers (4.18) that still loads our
+  MarianTokenizer. This is the NVIDIA-intended setup for this board.
+
+GOLDEN RULES (ignore these and you WILL get stuck again)
+  1. ALWAYS work inside venv36:   source /mnt/sd/weeb/entm/venv36/bin/activate
+  2. ALWAYS keep caches on the SD card, or the 14 GB "/" disk fills and
+     everything crashes with "No space left on device". Set every session:
+        export HF_HOME=/mnt/sd/cache/huggingface
+        export PIP_CACHE_DIR=/mnt/sd/cache/pip
+        export TMPDIR=/mnt/sd/tmp
+  3. Keep the old 3.8 venv/ around until GPU works — it's your CPU fallback.
+  4. Engines (.engine files) are HARDWARE-SPECIFIC. Build them ON THE NANO.
+     Never copy an engine from another machine.
+
+================================================================================
+  STAGE A — PROVE THE GPU IS REACHABLE  (do this first, ~10 min)
+================================================================================
+
+--- CHECKPOINT 1: does TensorRT import in the venv? --------------------------
+  This is the make-or-break line. The venv was created with
+  --system-site-packages so it can see the system's cp36 TensorRT.
+
+    source /mnt/sd/weeb/entm/venv36/bin/activate
+    python -c "import tensorrt as trt; print('TensorRT OK:', trt.__version__)"
+
+  EXPECT:  TensorRT OK: 8.2.1.9
+  IF ModuleNotFoundError:
+     The venv isn't seeing system packages. Recreate it WITH the flag:
+        deactivate
+        rm -rf venv36
+        /usr/bin/python3 -m venv --system-site-packages venv36
+        source venv36/bin/activate
+     Then re-run the import test.
+
+--- Set the cache env (every new shell) -------------------------------------
+    export HF_HOME=/mnt/sd/cache/huggingface
+    export PIP_CACHE_DIR=/mnt/sd/cache/pip
+    export TMPDIR=/mnt/sd/tmp
+    mkdir -p /mnt/sd/tmp /mnt/sd/cache/huggingface /mnt/sd/cache/pip
+
+--- Install the Python 3.6 runtime deps -------------------------------------
+    pip install --upgrade pip
+    pip install "transformers==4.18.0" "tokenizers<0.13" sentencepiece sacremoses "numpy<1.20"
+    pip install sounddevice soundfile webrtcvad pycuda
+
+  WHY these versions:
+     transformers 4.18  = last line that supports Python 3.6, still loads the
+                          MarianTokenizer (vocab 64110) our model uses.
+     numpy <1.20        = what CUDA 10.2 / old scipy stack expects on cp36.
+     pycuda             = moves data between CPU and GPU for the TensorRT
+                          decode loop. It BUILDS on CUDA 10.2 (unlike CT2).
+                          If pip pycuda fails to build, install CUDA on PATH:
+                             export PATH=/usr/local/cuda/bin:$PATH
+                             export CUDA_ROOT=/usr/local/cuda
+                          then retry.
+
+--- CHECKPOINT 2: GPU + tokenizer in ONE interpreter ------------------------
+    python -c "import tensorrt, pycuda.autoinit, transformers, sounddevice; print('all imports OK')"
+    python -c "from transformers import AutoTokenizer; t=AutoTokenizer.from_pretrained('/mnt/sd/weeb/entm/model_onnx'); print('tokenizer OK, vocab', t.vocab_size)"
+
+  EXPECT:  all imports OK   /   tokenizer OK, vocab 64110
+  This proves the exact combo that was IMPOSSIBLE on Python 3.8:
+  GPU (tensorrt+pycuda) AND the model tokenizer, together.
+
+  >>> STOP HERE and tell me both checkpoints passed. I then write the
+      TensorRT translation backend (Stage B). <<<
+
+================================================================================
+  STAGE B — TRANSLATION ON THE GPU (TensorRT)   [I write code, you build/run]
+================================================================================
+
+WHAT I WILL ADD (on the dev machine, you'll pull it):
+   nvidia/marian_trt.py   - loads TensorRT engines for the encoder + decoder of
+                            your MarianMT model and runs a greedy decode loop on
+                            the GPU. Same interface as the current OnnxMarian, so
+                            engine.py just picks it up.
+   engine.py              - new option TRANSLATE_BACKEND=trt alongside onnx/ct2.
+
+WHAT YOU DO ON THE NANO (once you have the code):
+
+  B1. Build the TensorRT engines from your existing ONNX model. Engines are
+      built ONCE on the board and cached to disk. Rough shape (I'll give exact
+      commands with the code):
+         /usr/src/tensorrt/bin/trtexec \
+            --onnx=/mnt/sd/weeb/entm/model_onnx/encoder_model.onnx \
+            --saveEngine=/mnt/sd/weeb/entm/model_trt/encoder.engine \
+            --fp16
+      (decoder is built similarly, with dynamic-shape profiles for the growing
+       sequence length — the code + commands handle this.)
+
+      NOTE: engine build takes a few minutes and needs RAM. Close the browser,
+      run headless. If it OOMs, add swap (see Stage D swap steps).
+
+  B2. Run translation on the GPU:
+         source venv36/bin/activate
+         export HF_HOME=/mnt/sd/cache/huggingface TMPDIR=/mnt/sd/tmp
+         TRANSLATE_BACKEND=trt python -m nvidia.marian_trt "Hello, how are you?"
+      EXPECT: Hindi output, and a line saying the translator is on CUDA/TensorRT.
+
+  RESULT OF STAGE B:  translation runs on the GPU. STT is still on CPU for now.
+  This is a good MILESTONE — the whole pipeline works end-to-end here, just with
+  Whisper on CPU. Confirm it before the harder Stage C.
+
+================================================================================
+  STAGE C — WHISPER (STT) ON THE GPU   [the hard, uncertain part]
+================================================================================
+
+WHY IT'S HARDER: faster-whisper can't use the GPU here (CUDA 10.2). We replace
+it with a TensorRT Whisper. This needs PyTorch for Jetson (a special cp36 wheel,
+NOT pip's torch) and building Whisper into TensorRT engines on the board.
+
+STEPS (I'll give exact commands when we get here):
+  C1. Install NVIDIA/Qengineering PyTorch 3.6 wheel for JetPack 4.6.
+  C2. Install a TensorRT-Whisper path (e.g. whisper_trt) and build its engines
+      on the Nano for the "base" model.
+  C3. New backend nvidia/whisper_trt.py wired into engine.py's _load_whisper().
+  C4. Run:  WHISPER_BACKEND=trt python -m nvidia.server   -> STT on GPU.
+
+HONEST WARNING: this stage can get stuck (Whisper on Nano TensorRT is fiddly).
+If it fights too hard, keep Whisper on CPU (Stage B result) — that pipeline
+still works and is fully offline. GPU Whisper is an optimization, not a
+requirement for a working product.
+
+================================================================================
+  STAGE D — RUN THE FULL PIPELINE + POLISH
+================================================================================
+
+  D1. Fix the Piper TTS path (yours was wrong earlier). Find the real binary:
+         find /mnt/sd/piper -name piper -type f 2>/dev/null
+      then set (adjust to what find prints):
+         export PIPER_BIN=/mnt/sd/piper/<real path>/piper
+         export PIPER_VOICE=/mnt/sd/piper/piper_voices/hi_IN-pratham-medium.onnx
+
+  D2. Max clocks (or latency numbers lie):
+         sudo nvpmodel -m 0 && sudo jetson_clocks
+
+  D3. Add swap if engine builds / models OOM (you only have 1.9 GB swap):
+         sudo fallocate -l 4G /mnt/sd/swapfile
+         sudo chmod 600 /mnt/sd/swapfile
+         sudo mkswap /mnt/sd/swapfile && sudo swapon /mnt/sd/swapfile
+
+  D4. Run it — two terminals:
+         # terminal A: warm-model server
+         source venv36/bin/activate
+         export HF_HOME=/mnt/sd/cache/huggingface TMPDIR=/mnt/sd/tmp
+         export PIPER_BIN=... PIPER_VOICE=...
+         WHISPER_BACKEND=trt TRANSLATE_BACKEND=trt python -m nvidia.server
+            # (use WHISPER on cpu if Stage C not done: drop WHISPER_BACKEND=trt)
+
+         # terminal B: always-listening mic client
+         source venv36/bin/activate
+         python -m nvidia.client
+
+  D5. Watch it:  tegrastats   (RAM must stay < 4 GB; watch GR3D_FREQ for GPU use)
+
+  D6. Tune VAD if it cuts you off / won't trigger:
+         VAD_AGGRESSIVENESS=3 VAD_HANGOVER_MS=800 python -m nvidia.client
+
+================================================================================
+  QUICK STATUS MAP
+================================================================================
+  [DONE ] Disk fixed (caches -> SD card)
+  [DONE ] Python 3.6 venv created (the GPU-capable Python)
+  [NOW  ] Stage A: prove TensorRT imports + install 3.6 deps (Checkpoints 1 & 2)
+  [NEXT ] Stage B: TensorRT translation backend -> translation on GPU
+  [LATER] Stage C: TensorRT Whisper -> STT on GPU (hard, optional)
+  [LAST ] Stage D: run full pipeline, Piper, swap, clocks, tune
+
+  FALLBACK ALWAYS AVAILABLE: the Python 3.8 venv/ runs the whole pipeline on CPU
+  today. GPU work only makes it faster; you are never left with nothing.
+================================================================================
