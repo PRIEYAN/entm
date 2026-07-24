@@ -30,6 +30,12 @@ import os
 import shutil
 import subprocess
 import threading
+import time
+import wave
+try:
+    import queue as _queue          # py3
+except ImportError:                 # pragma: no cover
+    import Queue as _queue          # py2 fallback (unused on this board)
 from typing import Tuple
 
 from it2edge.paths import CT2_DIR
@@ -57,25 +63,84 @@ ADB_REMOTE = os.environ.get("ADB_REMOTE", "/sdcard/Movies/entm_tts.wav")
 VLC_PKG = os.environ.get("VLC_PKG", "org.videolan.vlc")
 
 
+# A single background consumer drains this queue so utterances play strictly
+# one-after-another. The phone (VLC via an intent) gives no "playback finished"
+# callback, so the consumer waits out each clip's real duration — read from the
+# WAV header — before sending the next. Producers (translation) never block on
+# audio: they synthesize a WAV and drop it on the queue.
+ADB_CACHE_DIR = os.environ.get("ADB_CACHE_DIR", "/tmp/entm_tts")
+ADB_REMOTE_DIR = os.environ.get("ADB_REMOTE_DIR", "/sdcard/Movies")
+# Fixed pad after each clip so VLC has time to launch/route before the next
+# push, and clips never clip into each other.
+ADB_GAP_S = float(os.environ.get("ADB_GAP_S", "0.35"))
+
+_adb_queue = None          # type: ignore  # lazily created queue.Queue
+_adb_worker = None         # type: ignore  # consumer thread
+_adb_seq = 0               # unique id per clip so a fast producer can't
+                           # overwrite a WAV that's still playing on the phone
+
+
+def _wav_duration_s(path):
+    """Seconds of audio in a PCM WAV, from its header (no external tool)."""
+    try:
+        with wave.open(path, "rb") as w:
+            frames, rate = w.getnframes(), w.getframerate()
+            return frames / float(rate) if rate else 0.0
+    except Exception:
+        return 0.0
+
+
+def _adb_consumer():
+    """Pop WAVs and play them on the phone, one fully before the next."""
+    while True:
+        local_wav, remote = _adb_queue.get()
+        try:
+            subprocess.run([ADB_BIN, "push", local_wav, remote], check=True)
+            subprocess.run(
+                [ADB_BIN, "shell", "am", "start",
+                 "-a", "android.intent.action.VIEW",
+                 "-d", "file://" + remote, "-t", "audio/wav", VLC_PKG],
+                check=True,
+            )
+            # Block until this clip has finished playing before the next push.
+            time.sleep(_wav_duration_s(local_wav) + ADB_GAP_S)
+        except Exception as exc:  # noqa: BLE001 — one bad clip must not kill the queue
+            print("[speak] adb playback failed: {}".format(exc))
+        finally:
+            _adb_queue.task_done()
+
+
+def _ensure_adb_worker():
+    global _adb_queue, _adb_worker
+    if _adb_worker is None:
+        os.makedirs(ADB_CACHE_DIR, exist_ok=True)
+        _adb_queue = _queue.Queue()
+        _adb_worker = threading.Thread(target=_adb_consumer, daemon=True)
+        _adb_worker.start()
+
+
 def _speak_adb(text: str):
-    """espeak-ng -> local WAV -> adb push -> VLC on the phone."""
+    """espeak-ng -> cached WAV -> enqueue for sequential playback on the phone.
+
+    Returns as soon as the WAV is queued; the background consumer pushes and
+    plays it, waiting out each clip before starting the next.
+    """
     if shutil.which("espeak-ng") is None:
         raise SystemExit("espeak-ng not found. Install:  sudo apt install -y espeak-ng")
     if shutil.which(ADB_BIN) is None:
         raise SystemExit(f"{ADB_BIN} not found (set ADB_BIN or install android-tools-adb)")
 
-    local_wav = os.environ.get("ADB_LOCAL_WAV", "/tmp/entm_tts.wav")
-    with _speak_lock:
-        subprocess.run(
-            ["espeak-ng", "-v", ESPEAK_VOICE, "-w", local_wav, text], check=True
-        )
-        subprocess.run([ADB_BIN, "push", local_wav, ADB_REMOTE], check=True)
-        subprocess.run(
-            [ADB_BIN, "shell", "am", "start",
-             "-a", "android.intent.action.VIEW",
-             "-d", "file://" + ADB_REMOTE, "-t", "audio/wav", VLC_PKG],
-            check=True,
-        )
+    global _adb_seq
+    _ensure_adb_worker()
+    with _speak_lock:                      # serialize espeak + seq bump only
+        _adb_seq += 1
+        seq = _adb_seq
+    local_wav = os.path.join(ADB_CACHE_DIR, "utt_{:06d}.wav".format(seq))
+    remote = ADB_REMOTE_DIR.rstrip("/") + "/entm_tts_{:06d}.wav".format(seq)
+    subprocess.run(
+        ["espeak-ng", "-v", ESPEAK_VOICE, "-w", local_wav, text], check=True
+    )
+    _adb_queue.put((local_wav, remote))    # consumer plays it in order
 
 
 def tts_available() -> Tuple[bool, str]:
