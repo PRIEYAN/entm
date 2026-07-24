@@ -16,7 +16,6 @@ Because frames only cross the socket while you're talking, the socket is silent
 during silence and the whole box idles — no polling anywhere.
 """
 
-from __future__ import annotations
 
 import argparse
 import os

@@ -23,9 +23,9 @@ up unchanged: `.tokenizer`, `.device`, `.translate([str]) -> [str]`.
 Runtime deps: tensorrt (system cp36), pycuda, numpy, transformers tokenizer.
 """
 
-from __future__ import annotations
 
 import os
+from typing import Optional
 
 import numpy as np
 
@@ -124,7 +124,7 @@ class _TrtRunner:
 class TrtMarian:
     """Greedy en->hi translator over TensorRT engines (no KV-cache)."""
 
-    def __init__(self, model_dir: str, engine_dir: str | None = None):
+    def __init__(self, model_dir: str, engine_dir: Optional[str] = None):
         import pycuda.autoinit  # noqa: F401 — creates the CUDA context
         import pycuda.driver as cuda
         import tensorrt as trt

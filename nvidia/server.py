@@ -22,7 +22,6 @@ keep up, the OLDEST pending item is dropped and a DROPPED event is sent to the
 client — never a silent drop, never unbounded RAM growth.
 """
 
-from __future__ import annotations
 
 import argparse
 import os

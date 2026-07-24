@@ -14,7 +14,6 @@ This is the fastest way to prove the translation half + Piper audio path work
 mic/STT half. Whisper is never loaded here.
 """
 
-from __future__ import annotations
 
 import argparse
 

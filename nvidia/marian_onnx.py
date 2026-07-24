@@ -21,9 +21,9 @@ the merged graph's use_cache branch is awkward to drive by hand, while this pair
 is a clean no-past / with-past split.
 """
 
-from __future__ import annotations
 
 import os
+from typing import Optional
 
 import numpy as np
 
@@ -87,7 +87,7 @@ class OnnxMarian:
         (hidden,) = self.encoder.run(None, {"input_ids": input_ids, "attention_mask": attn})
         return hidden, attn
 
-    def _present_to_past(self, out: dict, prev_past: dict | None) -> dict:
+    def _present_to_past(self, out: dict, prev_past: Optional[dict]) -> dict:
         """Build the next step's past-KV from a decoder run's `present.*` outputs.
 
         Decoder-side KV grows each step (comes from `present`); encoder-side KV is

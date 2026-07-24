@@ -17,7 +17,6 @@ Env (all optional, sane Jetson defaults):
     (Piper paths / audio: PIPER_BIN, PIPER_VOICE, AUDIO_OUT, ALSA_DEVICE — see speak.py)
 """
 
-from __future__ import annotations
 
 import os
 import time

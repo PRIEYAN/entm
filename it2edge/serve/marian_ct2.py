@@ -8,12 +8,11 @@ Standard CTranslate2 Marian recipe:
                               skip_special_tokens=True)
 """
 
-# `from __future__ import annotations` keeps the `str | None` hints below from
-# being evaluated at import time, so this module also imports on Python 3.9
-# (some Raspberry Pi OS images still ship 3.9).
-from __future__ import annotations
+# The Jetson Nano runs Python 3.6 — no PEP 604 unions (`str | None`) and no
+# `from __future__ import annotations` (3.7+). Use typing.Optional instead.
 
 import os
+from typing import Optional
 
 import ctranslate2
 from transformers import AutoTokenizer
@@ -21,7 +20,7 @@ from transformers import AutoTokenizer
 
 def load_marian(
     model_dir: str,
-    tokenizer_dir: str | None = None,
+    tokenizer_dir: Optional[str] = None,
     inter_threads: int = 1,
     intra_threads: int = 2,
 ):

@@ -33,7 +33,6 @@ Design choices
   wire format changes, both change.
 """
 
-from __future__ import annotations
 
 import json
 import socket

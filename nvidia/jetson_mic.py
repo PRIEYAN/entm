@@ -14,7 +14,6 @@ Recommended launch on the Jetson (max clocks + both models on GPU):
     WHISPER_MODEL=base WHISPER_DEVICE=cuda CT2_DEVICE=cuda python -m nvidia.jetson_mic
 """
 
-from __future__ import annotations
 
 import argparse
 import os

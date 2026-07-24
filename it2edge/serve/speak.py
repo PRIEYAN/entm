@@ -20,10 +20,9 @@ Design notes for the 1 GB Pi:
     synthesis finishes, and nothing is written to the SD card.
 """
 
-# `tuple[bool, str]` and other PEP 585 hints below are only subscriptable at
-# runtime on Python 3.9+. The Jetson Nano runs Python 3.8, so defer hint
-# evaluation to keep this module importable there.
-from __future__ import annotations
+# The Jetson Nano runs Python 3.6, which can't subscript builtin generics
+# (`tuple[...]`) at runtime and has no `from __future__ import annotations`
+# (that's 3.7+). So use typing.Tuple for the one annotated return below.
 
 import argparse
 import json
@@ -31,6 +30,7 @@ import os
 import shutil
 import subprocess
 import threading
+from typing import Tuple
 
 from it2edge.paths import CT2_DIR
 from it2edge.serve.marian_ct2 import load_marian, translate_marian
@@ -45,7 +45,7 @@ PIPER_VOICE = os.environ.get(
 _speak_lock = threading.Lock()
 
 
-def tts_available() -> tuple[bool, str]:
+def tts_available() -> Tuple[bool, str]:
     """Report whether Piper TTS can run, without raising.
 
     Returns (ok, reason). Used by /health so the service can start and serve

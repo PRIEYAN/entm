@@ -24,9 +24,9 @@ The utterance state machine (SpeechGate) adds:
     speaker has been quiet for the whole hangover.
 """
 
-from __future__ import annotations
 
 import os
+from typing import Optional
 
 from nvidia.protocol import SAMPLE_RATE, SAMPLE_WIDTH
 
@@ -125,8 +125,8 @@ class SpeechGate:
     def __init__(
         self,
         start_frames: int = 2,
-        hangover_ms: int | None = None,
-        max_utterance_ms: int | None = None,
+        hangover_ms: Optional[int] = None,
+        max_utterance_ms: Optional[int] = None,
     ):
         self._in_speech = False
         self._start_frames = max(1, start_frames)
