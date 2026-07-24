@@ -53,12 +53,17 @@ class Segmenter:
         self.buf = []               # list of blocks in the current sentence
         self.silence_s = 0.0        # trailing quiet accumulated
         self.in_speech = False
+        self._peak = 0.0            # loudest RMS seen in the current sentence
 
     def feed(self, block):
-        loud = _rms(block) >= SILENCE_RMS
+        level = _rms(block)
+        loud = level >= SILENCE_RMS
         if loud:
+            if not self.in_speech:
+                print("[mic] * speech detected (level {:.4f})".format(level))
             self.in_speech = True
             self.silence_s = 0.0
+            self._peak = max(self._peak, level)
             self.buf.append(block)
         elif self.in_speech:
             # Quiet, but we were mid-sentence: keep the gap (natural pauses) and
@@ -70,9 +75,16 @@ class Segmenter:
 
     def _flush(self):
         audio = np.concatenate(self.buf) if self.buf else np.zeros(0, np.float32)
-        self.buf, self.silence_s, self.in_speech = [], 0.0, False
-        if audio.size / SAMPLE_RATE >= MIN_SPEECH_S:
+        dur = audio.size / SAMPLE_RATE
+        peak = self._peak
+        self.buf, self.silence_s, self.in_speech, self._peak = [], 0.0, False, 0.0
+        if dur >= MIN_SPEECH_S:
+            print("[mic] silence {:.1f}s -> sentence ({:.1f}s, peak {:.4f}) "
+                  "-> transcribing".format(SILENCE_HANG, dur, peak))
             self.out.put(audio)
+        else:
+            print("[mic] ignored short blip ({:.2f}s < {:.2f}s)".format(
+                dur, MIN_SPEECH_S))
 
     def close(self):
         if self.in_speech:
@@ -88,8 +100,9 @@ def _transcribe_and_send(model, audio_q, sock_file, lang):
         segments, _ = model.transcribe(audio, language=lang)
         text = " ".join(s.text for s in segments).strip()
         if not text:
+            print("[whisper] (no text — silence or unrecognized speech)")
             continue
-        print(">> {}".format(text))
+        print("[whisper] >> {!r}  -> sending to Jetson".format(text))
         try:
             sock_file.write((text + "\n").encode("utf-8"))
             sock_file.flush()
@@ -104,11 +117,33 @@ def main():
     ap.add_argument("--port", type=int,
                     default=int(os.environ.get("TEXT_PORT", "8765")))
     ap.add_argument("--lang", default="en")
+    ap.add_argument("--device", default=os.environ.get("MIC_DEVICE"),
+                    help="input device index or name substring (see --list-devices)")
+    ap.add_argument("--list-devices", action="store_true",
+                    help="print available audio devices and exit")
     args = ap.parse_args()
 
     # Import here so --help works without the heavy deps installed.
     import sounddevice as sd
     from faster_whisper import WhisperModel
+
+    if args.list_devices:
+        print(sd.query_devices())
+        return
+
+    # Resolve the input device: an int index, or a name substring, or default.
+    mic = None
+    if args.device is not None:
+        try:
+            mic = int(args.device)
+        except ValueError:
+            mic = args.device                  # sounddevice matches by substring
+
+    # Capture at the mic's OWN native rate (many laptop mics reject 16 kHz
+    # outright — that's the ALSA -9999 error). We resample to 16 kHz for Whisper.
+    dev_info = sd.query_devices(mic, "input")
+    native_sr = int(dev_info["default_samplerate"])
+    print("[mic-client] mic: {}  @ {} Hz".format(dev_info["name"], native_sr))
 
     name = os.environ.get("WHISPER_MODEL", "base")
     device = os.environ.get("WHISPER_DEVICE", "cpu")
@@ -130,17 +165,45 @@ def main():
         args=(model, audio_q, sock_file, args.lang), daemon=True)
     worker.start()
 
-    block_frames = int(SAMPLE_RATE * BLOCK_S)
+    # Native block granularity; we resample each block to 16 kHz below.
+    block_frames = int(native_sr * BLOCK_S)
+    resample = native_sr != SAMPLE_RATE
+    ratio = SAMPLE_RATE / float(native_sr)
+
+    # Live level meter: a heartbeat so you can SEE the mic is delivering audio
+    # even before you speak. Prints ~once/second with the current input level.
+    meter = {"n": 0, "max": 0.0}
+    meter_every = max(1, int(1.0 / BLOCK_S))   # ~1 s
 
     def on_audio(indata, frames, time_info, status):   # sounddevice callback
         if status:
             print("[mic-client] audio status: {}".format(status), file=sys.stderr)
-        seg.feed(indata[:, 0].copy())          # mono channel 0, -1..1 float32
+        block = indata[:, 0].copy()            # mono channel 0, -1..1 float32
+        if resample:
+            # cheap linear resample native_sr -> 16 kHz (good enough for STT)
+            n_out = max(1, int(round(block.size * ratio)))
+            xp = np.linspace(0.0, 1.0, block.size, endpoint=False)
+            x = np.linspace(0.0, 1.0, n_out, endpoint=False)
+            block = np.interp(x, xp, block).astype(np.float32)
+
+        lvl = _rms(block)
+        meter["n"] += 1
+        meter["max"] = max(meter["max"], lvl)
+        if meter["n"] >= meter_every:
+            bar = "#" * min(40, int(meter["max"] / max(SILENCE_RMS, 1e-6) * 5))
+            state = "SPEECH" if meter["max"] >= SILENCE_RMS else "quiet "
+            print("[mic] level {:.4f} thr {:.4f} {} |{}".format(
+                meter["max"], SILENCE_RMS, state, bar))
+            meter["n"], meter["max"] = 0, 0.0
+
+        seg.feed(block)
 
     try:
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+        with sd.InputStream(samplerate=native_sr, channels=1, device=mic,
                             dtype="float32", blocksize=block_frames,
                             callback=on_audio):
+            print("[mic-client] listening... (a level line prints ~1/s; "
+                  "speak and watch for SPEECH)")
             threading.Event().wait()           # run until Ctrl-C
     except KeyboardInterrupt:
         print("\n[mic-client] stopping")
