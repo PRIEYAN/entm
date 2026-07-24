@@ -45,17 +45,56 @@ PIPER_VOICE = os.environ.get(
 _speak_lock = threading.Lock()
 
 
+# --- espeak-ng + adb backend (AUDIO_OUT=adb) --------------------------------
+# The prebuilt Piper binary needs GLIBC_2.29 / GLIBCXX_3.4.26, which the Jetson
+# Nano (Ubuntu 18.04, glibc 2.27) does not have, so the binary can't run here.
+# This backend instead synthesizes Hindi with espeak-ng (built against the
+# board's own glibc) and plays it on an ADB-connected phone via VLC. It writes
+# a small WAV, pushes it, and asks VLC to open it — one utterance at a time.
+ESPEAK_VOICE = os.environ.get("ESPEAK_VOICE", "hi")
+ADB_BIN = os.environ.get("ADB_BIN", "adb")
+ADB_REMOTE = os.environ.get("ADB_REMOTE", "/sdcard/Movies/entm_tts.wav")
+VLC_PKG = os.environ.get("VLC_PKG", "org.videolan.vlc")
+
+
+def _speak_adb(text: str):
+    """espeak-ng -> local WAV -> adb push -> VLC on the phone."""
+    if shutil.which("espeak-ng") is None:
+        raise SystemExit("espeak-ng not found. Install:  sudo apt install -y espeak-ng")
+    if shutil.which(ADB_BIN) is None:
+        raise SystemExit(f"{ADB_BIN} not found (set ADB_BIN or install android-tools-adb)")
+
+    local_wav = os.environ.get("ADB_LOCAL_WAV", "/tmp/entm_tts.wav")
+    with _speak_lock:
+        subprocess.run(
+            ["espeak-ng", "-v", ESPEAK_VOICE, "-w", local_wav, text], check=True
+        )
+        subprocess.run([ADB_BIN, "push", local_wav, ADB_REMOTE], check=True)
+        subprocess.run(
+            [ADB_BIN, "shell", "am", "start",
+             "-a", "android.intent.action.VIEW",
+             "-d", "file://" + ADB_REMOTE, "-t", "audio/wav", VLC_PKG],
+            check=True,
+        )
+
+
 def tts_available() -> Tuple[bool, str]:
-    """Report whether Piper TTS can run, without raising.
+    """Report whether TTS can run, without raising.
 
     Returns (ok, reason). Used by /health so the service can start and serve
     text translations even on a machine with no Piper or no sound card.
     """
+    backend = os.environ.get("AUDIO_OUT", "alsa").lower()
+    if backend == "adb":
+        if shutil.which("espeak-ng") is None:
+            return False, "espeak-ng not found (AUDIO_OUT=adb)"
+        if shutil.which(ADB_BIN) is None:
+            return False, f"{ADB_BIN} not found (AUDIO_OUT=adb)"
+        return True, "ok"
     if not os.path.isfile(PIPER_BIN):
         return False, f"piper binary not found at {PIPER_BIN}"
     if not os.path.isfile(PIPER_VOICE):
         return False, f"piper voice not found at {PIPER_VOICE}"
-    backend = os.environ.get("AUDIO_OUT", "alsa").lower()
     player = "paplay" if backend == "pulse" else "aplay"
     if shutil.which(player) is None:
         return False, f"{player} not found (backend={backend})"
@@ -72,6 +111,12 @@ def _voice_sample_rate(default="22050"):
 
 
 def speak(text: str):
+    # espeak-ng -> adb -> phone speaker (works on the glibc-2.27 Jetson, where
+    # the prebuilt Piper binary cannot link). Selected with AUDIO_OUT=adb.
+    if os.environ.get("AUDIO_OUT", "alsa").lower() == "adb":
+        _speak_adb(text)
+        return
+
     if not os.path.isfile(PIPER_BIN):
         raise SystemExit(
             f"Piper binary not found at {PIPER_BIN}. Install it (see nvidia/NvidiaRun.md) "
