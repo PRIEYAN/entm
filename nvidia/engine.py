@@ -118,14 +118,34 @@ class Engine:
         print(f"[engine] Whisper '{name}' on CPU (int8)")
 
     def _load_translator(self) -> None:
-        # Backend choice: 'onnx' runs on the Jetson GPU (ONNX Runtime), 'ct2' uses
-        # the CPU-only CTranslate2 int8 model. Default onnx so `CT2_DEVICE=cuda`
-        # actually reaches the GPU — CT2 4.x has no CUDA build for the Nano.
+        # Backend choice:
+        #   'trt'  -> TensorRT engines on the Jetson GPU (JetPack 4.6 / CUDA 10.2).
+        #             THE real GPU path on the Nano — CT2 & onnxruntime-gpu need CUDA 11+.
+        #   'onnx' -> ONNX Runtime (GPU only where a CUDA onnxruntime wheel exists;
+        #             CPU otherwise). Useful on dev boxes / newer Jetsons.
+        #   'ct2'  -> CPU-only CTranslate2 int8. The safe fallback everywhere.
         backend = os.environ.get("TRANSLATE_BACKEND", "onnx").lower()
-        if backend == "onnx":
+        if backend == "trt":
+            self._load_translator_trt()
+        elif backend == "onnx":
             self._load_translator_onnx()
         else:
             self._load_translator_ct2()
+
+    def _load_translator_trt(self) -> None:
+        from nvidia.marian_trt import TrtMarian
+
+        model_dir = os.environ.get("ONNX_MODEL_DIR", "model_onnx")  # tokenizer lives here
+        if not os.path.isdir(model_dir):
+            raise SystemExit(
+                f"Model/tokenizer dir not found at {model_dir}. Set ONNX_MODEL_DIR."
+            )
+        # TrtMarian raises SystemExit with build instructions if engines are missing.
+        self._onnx = TrtMarian(model_dir)  # reuses the ONNX sentinel path in translate()
+        self.tokenizer = self._onnx.tokenizer
+        self.translator = self._onnx
+        self.ct2_device = self._onnx.device
+        print("[engine] Translator (MarianMT TensorRT) on CUDA")
 
     def _load_translator_onnx(self) -> None:
         from nvidia.marian_onnx import OnnxMarian

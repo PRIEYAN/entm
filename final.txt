@@ -23,11 +23,7 @@ GOLDEN RULES (ignore these and you WILL get stuck again)
   2. ALWAYS keep caches on the SD card, or the 14 GB "/" disk fills and
      everything crashes with "No space left on device". Set every session:
         export HF_HOME=/mnt/sd/cache/huggingface
-        export PIP_CACHE_DIR=/mnt/sd/cache/pip
-        export TMPDIR=/mnt/sd/tmp
-  3. Keep the old 3.8 venv/ around until GPU works — it's your CPU fallback.
-  4. Engines (.engine files) are HARDWARE-SPECIFIC. Build them ON THE NANO.
-     Never copy an engine from another machine.
+        export PIP_CACHE_DIR=/mnt/sd/cache/pipd
 
 ================================================================================
   STAGE A — PROVE THE GPU IS REACHABLE  (do this first, ~10 min)
@@ -83,40 +79,58 @@ GOLDEN RULES (ignore these and you WILL get stuck again)
       TensorRT translation backend (Stage B). <<<
 
 ================================================================================
-  STAGE B — TRANSLATION ON THE GPU (TensorRT)   [I write code, you build/run]
+  STAGE B — TRANSLATION ON THE GPU (TensorRT)   [CODE DONE — you build+run]
 ================================================================================
 
-WHAT I WILL ADD (on the dev machine, you'll pull it):
-   nvidia/marian_trt.py   - loads TensorRT engines for the encoder + decoder of
-                            your MarianMT model and runs a greedy decode loop on
-                            the GPU. Same interface as the current OnnxMarian, so
-                            engine.py just picks it up.
-   engine.py              - new option TRANSLATE_BACKEND=trt alongside onnx/ct2.
+CODE ADDED (pull it first — see below):
+   nvidia/marian_trt.py         - TensorRT encoder + no-KV-cache decoder greedy
+                                  loop via pycuda. Same interface as OnnxMarian.
+   nvidia/build_trt_engines.sh  - builds encoder.engine + decoder.engine on the Nano.
+   engine.py                    - new TRANSLATE_BACKEND=trt option.
 
-WHAT YOU DO ON THE NANO (once you have the code):
-
-  B1. Build the TensorRT engines from your existing ONNX model. Engines are
-      built ONCE on the board and cached to disk. Rough shape (I'll give exact
-      commands with the code):
-         /usr/src/tensorrt/bin/trtexec \
-            --onnx=/mnt/sd/weeb/entm/model_onnx/encoder_model.onnx \
-            --saveEngine=/mnt/sd/weeb/entm/model_trt/encoder.engine \
-            --fp16
-      (decoder is built similarly, with dynamic-shape profiles for the growing
-       sequence length — the code + commands handle this.)
-
-      NOTE: engine build takes a few minutes and needs RAM. Close the browser,
-      run headless. If it OOMs, add swap (see Stage D swap steps).
-
-  B2. Run translation on the GPU:
+  B0. Pull the new code onto the Jetson:
+         cd /mnt/sd/weeb/entm
+         git pull origin jetson-realtime
          source venv36/bin/activate
+         export OPENBLAS_CORETYPE=ARMV8            # numpy crash fix (always needed)
          export HF_HOME=/mnt/sd/cache/huggingface TMPDIR=/mnt/sd/tmp
-         TRANSLATE_BACKEND=trt python -m nvidia.marian_trt "Hello, how are you?"
-      EXPECT: Hindi output, and a line saying the translator is on CUDA/TensorRT.
 
-  RESULT OF STAGE B:  translation runs on the GPU. STT is still on CPU for now.
-  This is a good MILESTONE — the whole pipeline works end-to-end here, just with
-  Whisper on CPU. Confirm it before the harder Stage C.
+  B1. Build the TensorRT engines (ONCE; a few min each; needs RAM -> do Stage D
+      swap first if it OOMs). This reads model_onnx/ and writes model_trt/:
+         bash nvidia/build_trt_engines.sh
+
+      What it does: builds encoder.engine and decoder.engine with fp16 and
+      dynamic-shape profiles (1..128 tokens). Uses trtexec at
+      /usr/src/tensorrt/bin/trtexec.
+
+      IF trtexec FAILS TO PARSE THE ONNX (opset too new for TRT 8.2): re-export
+      the model at a lower opset on the DEV box and copy model_onnx/ over:
+         optimum-cli export onnx --model model_cache_compact_ft \
+            --task text2text-generation-with-past --opset 13 model_onnx
+      (opset 13 is safe for TRT 8.2. Then rerun B1.)
+
+  B2. Test translation on the GPU (no server needed):
+         python -m nvidia.marian_trt "Hello, how are you?"
+      EXPECT:
+         [trt] MarianMT translator on cuda (TensorRT)
+         EN: Hello, how are you?
+         -> हैलो, आप कैसे हैं?
+
+  B3. Confirm the engine wiring picks it up:
+         TRANSLATE_BACKEND=trt python -m nvidia.text_test "Good morning"
+         # prints "[text-test] translator on cuda" + the Hindi
+
+  RESULT OF STAGE B:  translation runs on the GPU. STT still on CPU for now.
+  MILESTONE — the whole pipeline works end-to-end here (Whisper on CPU). You can
+  even run the full app now:
+     TRANSLATE_BACKEND=trt WHISPER_DEVICE=cpu python -m nvidia.server   # terminal A
+     python -m nvidia.client                                            # terminal B
+  Confirm this works before attempting the harder Stage C.
+
+  NOTE ON SPEED: this decoder re-feeds the whole sequence each step (no KV-cache)
+  for robustness on TRT 8.2. For short sentences on a 77M model it's fast. If you
+  later want max speed, the KV-cache decoder is a future optimization, not needed
+  for a working product.
 
 ================================================================================
   STAGE C — WHISPER (STT) ON THE GPU   [the hard, uncertain part]
@@ -178,8 +192,8 @@ requirement for a working product.
 ================================================================================
   [DONE ] Disk fixed (caches -> SD card)
   [DONE ] Python 3.6 venv created (the GPU-capable Python)
-  [NOW  ] Stage A: prove TensorRT imports + install 3.6 deps (Checkpoints 1 & 2)
-  [NEXT ] Stage B: TensorRT translation backend -> translation on GPU
+  [DONE ] Stage A: TensorRT imports + 3.6 deps + tokenizer (Checkpoints 1 & 2 PASSED)
+  [NOW  ] Stage B: build TRT engines (B1) + test GPU translation (B2/B3)
   [LATER] Stage C: TensorRT Whisper -> STT on GPU (hard, optional)
   [LAST ] Stage D: run full pipeline, Piper, swap, clocks, tune
 
