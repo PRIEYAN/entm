@@ -121,7 +121,17 @@ def main():
                     help="input device index or name substring (see --list-devices)")
     ap.add_argument("--list-devices", action="store_true",
                     help="print available audio devices and exit")
+    ap.add_argument("--silence-rms", type=float, default=None,
+                    help="loudness threshold for silence (overrides SILENCE_RMS); "
+                         "set it between your noise floor and your speech level")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="measure the room's noise floor for ~2 s and set the "
+                         "silence threshold automatically, then start")
     args = ap.parse_args()
+
+    global SILENCE_RMS
+    if args.silence_rms is not None:
+        SILENCE_RMS = args.silence_rms
 
     # Import here so --help works without the heavy deps installed.
     import sounddevice as sd
@@ -144,6 +154,19 @@ def main():
     dev_info = sd.query_devices(mic, "input")
     native_sr = int(dev_info["default_samplerate"])
     print("[mic-client] mic: {}  @ {} Hz".format(dev_info["name"], native_sr))
+
+    if args.calibrate:
+        secs = 2.0
+        print("[mic-client] calibrating: stay SILENT for {:.0f}s...".format(secs))
+        rec = sd.rec(int(secs * native_sr), samplerate=native_sr, channels=1,
+                     dtype="float32", device=mic)
+        sd.wait()
+        noise = _rms(rec[:, 0])
+        # Put the threshold a few x above the noise floor, so noise reads quiet
+        # but speech (usually >>) clears it. Floor at the old default.
+        SILENCE_RMS = max(0.015, round(noise * 4.0, 4))
+        print("[mic-client] noise floor {:.4f} -> SILENCE_RMS = {:.4f}".format(
+            noise, SILENCE_RMS))
 
     name = os.environ.get("WHISPER_MODEL", "base")
     device = os.environ.get("WHISPER_DEVICE", "cpu")
